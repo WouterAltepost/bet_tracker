@@ -37,6 +37,15 @@ LEADERBOARD_TAB = "Leaderboard"
 
 SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "claude"]
 
+SITE_COLORS = {
+    "forebet":       {"red": 0.788, "green": 0.875, "blue": 0.953},  # pastel blue
+    "predictz":      {"red": 0.980, "green": 0.898, "blue": 0.706},  # pastel orange
+    "onemillion":    {"red": 0.851, "green": 0.918, "blue": 0.827},  # pastel green
+    "vitibet":       {"red": 0.851, "green": 0.824, "blue": 0.914},  # pastel purple
+    "freesupertips": {"red": 0.957, "green": 0.800, "blue": 0.800},  # pastel red
+    "claude":        {"red": 1.000, "green": 0.949, "blue": 0.800},  # pastel yellow
+}
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
@@ -117,15 +126,55 @@ def read_tab(service, tab_name):
     return result.get("values", [])
 
 
+def apply_site_colors(service, sheet_id, site_row_ranges):
+    """
+    Apply pastel background colors to each site's rows.
+    site_row_ranges: list of (site, start_row_0idx, end_row_0idx) — end is exclusive.
+    """
+    requests = []
+    for site, start, end in site_row_ranges:
+        color = SITE_COLORS.get(site)
+        if not color:
+            continue
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": start,
+                    "endRowIndex": end,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": 7,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": color,
+                    }
+                },
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        })
+    if requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": requests},
+        ).execute()
+        print(f"  Colors applied for {len(requests)} site(s)")
+
+
 # ---------------------------------------------------------------------------
 # Mode: predictions
 # ---------------------------------------------------------------------------
 
 def mode_predictions(service, run_date):
-    get_or_create_tab(service, PREDICTIONS_TAB)
+    sheet_id = get_or_create_tab(service, PREDICTIONS_TAB)
     ensure_headers(service, PREDICTIONS_TAB, PREDICTIONS_HEADERS)
 
+    # Current row count (including header) tells us where new rows will land
+    existing = read_tab(service, PREDICTIONS_TAB)
+    base_row = len(existing)  # 0-indexed start index for first new row
+
     rows_to_append = []
+    site_row_ranges = []  # (site, start_0idx, end_0idx)
 
     for site in SITES:
         path = os.path.join(TMP_DIR, f"predictions_{site}_{run_date}.json")
@@ -137,12 +186,16 @@ def mode_predictions(service, run_date):
         with open(path) as f:
             data = json.load(f)
 
+        site_start = base_row + len(rows_to_append)
+
         if data["status"] == "failed":
             print(f"  [{site}] SCRAPE_FAILED — {data.get('error', 'unknown error')}")
             for _ in range(5):
                 rows_to_append.append([run_date, site, "SCRAPE_FAILED", "", "", "", ""])
+            site_row_ranges.append((site, site_start, site_start + 5))
         else:
-            for pred in data["predictions"][:5]:
+            preds = data["predictions"][:5]
+            for pred in preds:
                 rows_to_append.append([
                     run_date,
                     site,
@@ -152,6 +205,7 @@ def mode_predictions(service, run_date):
                     "",  # Result — filled in evening run
                     "",  # Correct — filled in evening run
                 ])
+            site_row_ranges.append((site, site_start, site_start + len(preds)))
             print(f"  [{site}] {len(data['predictions'])} predictions loaded")
 
     if not rows_to_append:
@@ -166,6 +220,8 @@ def mode_predictions(service, run_date):
         body={"values": rows_to_append},
     ).execute()
     print(f"\nAppended {len(rows_to_append)} rows to '{PREDICTIONS_TAB}'")
+
+    apply_site_colors(service, sheet_id, site_row_ranges)
 
 
 # ---------------------------------------------------------------------------
