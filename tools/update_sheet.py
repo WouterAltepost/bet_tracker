@@ -51,16 +51,28 @@ PREDICTIONS_HEADERS = ["Date", "Site", "Home Team", "Away Team", "Prediction", "
 
 def get_service():
     creds = None
-    if os.path.exists(TOKEN_FILE):
+    token_env = os.environ.get("GOOGLE_TOKEN_JSON")
+    credentials_env = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+
+    if token_env:
+        creds = Credentials.from_authorized_user_info(json.loads(token_env), SCOPES)
+    elif os.path.exists(TOKEN_FILE):
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            if not token_env:
+                with open(TOKEN_FILE, "w") as f:
+                    f.write(creds.to_json())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            if credentials_env:
+                flow = InstalledAppFlow.from_client_config(json.loads(credentials_env), SCOPES)
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
             creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, "w") as f:
-            f.write(creds.to_json())
+            with open(TOKEN_FILE, "w") as f:
+                f.write(creds.to_json())
     return build("sheets", "v4", credentials=creds)
 
 
