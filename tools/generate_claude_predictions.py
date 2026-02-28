@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import traceback
 from datetime import date
 
 from dotenv import load_dotenv
@@ -124,6 +125,9 @@ def run_agentic_loop(client, run_date):
             betas=["web-search-2025-03-05"],
         )
 
+        block_types = [getattr(b, "type", type(b).__name__) for b in response.content]
+        print(f"  [claude] stop_reason={response.stop_reason}, blocks={block_types}")
+
         if response.stop_reason == "end_turn":
             # Extract all text from the final response
             final_text = ""
@@ -146,7 +150,7 @@ def run_agentic_loop(client, run_date):
 
         if not tool_results:
             # Shouldn't happen with hosted tool, but avoid infinite loop
-            print("  [claude] WARNING: tool_use stop but no tool_result blocks found")
+            print(f"  [claude] WARNING: stop_reason={response.stop_reason} but no tool_result blocks found in {block_types}")
             break
 
         messages.append({"role": "user", "content": tool_results})
@@ -180,7 +184,8 @@ def main():
     try:
         final_text = run_agentic_loop(client, run_date)
     except Exception as e:
-        error_msg = f"API error: {e}"
+        traceback.print_exc()
+        error_msg = f"API error: {type(e).__name__}: {e}"
         print(f"[{SITE}] PRED_FAILED — {error_msg}")
         path = write_output(run_date, [], error=error_msg)
         print(f"[{SITE}] Failed output written to {path}")

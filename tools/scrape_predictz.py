@@ -53,10 +53,30 @@ async def scrape():
     run_date = str(date.today())
     print(f"[{SITE}] Scraping {URL} for {run_date} ...")
 
+    # Comprehensive stealth init script — hides common automation fingerprints
+    STEALTH_SCRIPT = """
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-GB', 'en']});
+        window.chrome = {runtime: {}, loadTimes: function(){}, csi: function(){}, app: {}};
+        const origQuery = window.navigator.permissions.query;
+        window.navigator.permissions.query = (p) =>
+            p.name === 'notifications'
+                ? Promise.resolve({state: Notification.permission})
+                : origQuery(p);
+    """
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=True,
-            args=["--disable-blink-features=AutomationControlled"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-infobars",
+                "--window-size=1280,900",
+            ],
         )
         context = await browser.new_context(
             user_agent=(
@@ -72,18 +92,20 @@ async def scrape():
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             },
         )
-        await context.add_init_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
+        await context.add_init_script(STEALTH_SCRIPT)
         page = await context.new_page()
 
         try:
-            await page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-            # Wait for match rows to appear, fall back to fixed delay
+            await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+            # Wait for match rows to appear, fall back to networkidle then fixed delay
             try:
-                await page.wait_for_selector("tr.pzcnt", timeout=10000)
+                await page.wait_for_selector("tr.pzcnt", timeout=15000)
             except Exception:
-                await page.wait_for_timeout(5000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3000)
 
             predictions = await extract_predictions(page)
 

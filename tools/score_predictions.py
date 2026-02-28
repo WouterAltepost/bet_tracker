@@ -5,7 +5,7 @@ Reads:
   .tmp/predictions_{site}_{date}.json  (for each of 5 sites)
   .tmp/results_{date}.json
 
-Uses rapidfuzz for fuzzy team name matching (threshold: 80).
+Uses rapidfuzz for fuzzy team name matching (threshold: 60).
 Both long name and short name from the results file are tried.
 
 Produces:
@@ -37,13 +37,45 @@ Correct values:
 
 import json
 import os
+import re
 import sys
+import unicodedata
 from datetime import date
 
 from rapidfuzz import fuzz
 
 SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "claude"]
-FUZZY_THRESHOLD = 80
+FUZZY_THRESHOLD = 60
+
+# Known alternate → canonical name mappings (all lowercase, pre-normalized).
+# Expand this dict whenever a new site-specific alias causes persistent UNMATCHED results.
+TEAM_ALIASES = {
+    # Eastern European / translated names
+    "crvena zvezda": "red star belgrade",
+    "red star": "red star belgrade",
+    # UK abbreviations
+    "nott'm forest": "nottingham forest",
+    "nott'm": "nottingham",
+    "wolves": "wolverhampton wanderers",
+    "spurs": "tottenham hotspur",
+    "man city": "manchester city",
+    "man utd": "manchester united",
+    "man united": "manchester united",
+    "sheffield utd": "sheffield united",
+    "sheff utd": "sheffield united",
+    "west brom": "west bromwich albion",
+    "brighton": "brighton hove albion",
+    "brighton & hove albion": "brighton hove albion",
+    "brighton and hove albion": "brighton hove albion",
+    # French clubs
+    "paris saint germain": "psg",
+    "paris saint-germain": "psg",
+    # Vitibet city-suffix variants
+    "aston villa birmingham": "aston villa",
+    "juventus torino": "juventus",
+    "atalanta bergamo": "atalanta",
+    "benfica lisboa": "benfica",
+}
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(BASE_DIR, ".tmp")
@@ -83,13 +115,21 @@ def load_results(run_date):
 
 
 def normalize(name):
-    """Normalize team name for fuzzy comparison: lowercase, hyphens→spaces, strip FC/CF suffixes."""
-    import re
-    n = name.lower()
+    """Normalize team name for fuzzy comparison.
+
+    Steps: strip accents, lowercase, hyphens→spaces, strip FC/CF-style suffixes,
+    then apply TEAM_ALIASES for known alternate names.
+    """
+    # Strip accents (Fenerbahçe → Fenerbahce, Crvena → still Crvena)
+    n = unicodedata.normalize("NFKD", name)
+    n = "".join(c for c in n if not unicodedata.combining(c))
+    n = n.lower()
     n = n.replace("-", " ").replace("_", " ")
-    # Strip common suffixes that differ across sites
-    n = re.sub(r"\b(fc|cf|sc|ac|rc|bv|sv|vv|if|fk|sk|uk|as|ss|us|cd|sd|rcd|ud|cf)\b", "", n)
+    # Strip common club-type abbreviations that differ across sites
+    n = re.sub(r"\b(fc|cf|sc|ac|rc|bv|sv|vv|if|fk|sk|uk|as|ss|us|cd|sd|rcd|ud)\b", "", n)
     n = " ".join(n.split())  # collapse whitespace
+    # Apply known aliases
+    n = TEAM_ALIASES.get(n, n)
     return n
 
 
