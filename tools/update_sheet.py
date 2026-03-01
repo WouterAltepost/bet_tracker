@@ -153,12 +153,20 @@ def apply_site_colors(service, sheet_id, site_row_ranges):
                 "fields": "userEnteredFormat.backgroundColor",
             }
         })
+    if not requests:
+        print("  [color] No color requests generated — site_row_ranges may be empty or all sites unknown")
+        return
     if requests:
-        service.spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={"requests": requests},
-        ).execute()
-        print(f"  Colors applied for {len(requests)} site(s)")
+        print(f"  [color] Sending {len(requests)} color request(s) to Sheets API")
+        try:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body={"requests": requests},
+            ).execute()
+            print(f"  [color] Colors applied for {len(requests)} site(s)")
+        except Exception as e:
+            print(f"  [color] batchUpdate failed: {e}")
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +229,12 @@ def mode_predictions(service, run_date):
     ).execute()
     print(f"\nAppended {len(rows_to_append)} rows to '{PREDICTIONS_TAB}'")
 
-    apply_site_colors(service, sheet_id, site_row_ranges)
+    print(f"[color] Calling apply_site_colors: sheet_id={sheet_id}, ranges={site_row_ranges}")
+    try:
+        apply_site_colors(service, sheet_id, site_row_ranges)
+        print("[color] apply_site_colors completed successfully")
+    except Exception as e:
+        print(f"[color] ERROR in apply_site_colors: {e}")
 
 
 # ---------------------------------------------------------------------------
