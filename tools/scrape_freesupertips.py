@@ -1,14 +1,18 @@
 """
 scrape_freesupertips.py — Scrape top 5 1X2 football predictions from freesupertips.com
 
-The listing page shows featured match prediction links (a.Prediction).
-Each link leads to a match detail page where the main prediction is in:
-    div.IndividualTipPrediction > h4
-    e.g. "Atalanta to Win", "Draw", "Borussia Dortmund to Win"
+The listing page groups predictions by league section (H2 headings). We scroll
+the full page to trigger any lazy-loaded sections, then pick the first prediction
+from each section to get variety across competitions. We keep collecting until
+we have 5 or exhaust all available matches.
 
-Non-1X2 tips (BTTS, over/under goals, etc.) are skipped. All available links
-are checked until 5 valid 1X2 predictions are found. If fewer than 5 are
-available that day, the output includes what was found with a warning.
+Each match link leads to a detail page where the main prediction is in:
+    div.IndividualTipPrediction > h4
+    e.g. "Atalanta to Win", "Draw", "Real Madrid to Win and Under 2.5 Match Goals"
+
+Tips are converted to 1/X/2. Compound tips (e.g. "Team to Win and Under 2.5")
+have their 1X2 component extracted before falling back to skipping them.
+Non-1X2-only tips (BTTS, correct score, etc.) are skipped.
 
 Output: .tmp/predictions_freesupertips_{date}.json
 """
@@ -64,6 +68,20 @@ def is_1x2_tip(tip_text):
     return True
 
 
+def extract_1x2_component(tip_text):
+    """
+    Try to extract a 1X2 part from a compound tip like
+    'Real Madrid to Win and Under 2.5 Match Goals'.
+    Splits on ' and ' and returns the first part that passes is_1x2_tip.
+    Returns None if no 1X2 component found.
+    """
+    for part in tip_text.split(" and "):
+        part = part.strip()
+        if part and is_1x2_tip(part):
+            return part
+    return None
+
+
 def parse_prediction(tip_text, home_team, away_team):
     """
     Convert tip text like "Atalanta to Win" or "Draw" to 1/X/2.
@@ -74,11 +92,9 @@ def parse_prediction(tip_text, home_team, away_team):
     if "draw" in t:
         return "X"
 
-    # Check if team name appears in tip text
     home_lower = home_team.lower()
     away_lower = away_team.lower()
 
-    # Try exact and partial match — compare significant words
     home_words = set(home_lower.split())
     away_words = set(away_lower.split())
     tip_words = set(t.split())
@@ -91,13 +107,123 @@ def parse_prediction(tip_text, home_team, away_team):
     if away_overlap and not home_overlap:
         return "2"
 
-    # Fallback: check if tip contains home/away team name as substring
+    # Fallback: substring match on significant words
     if any(word in t for word in home_lower.split() if len(word) > 3):
         return "1"
     if any(word in t for word in away_lower.split() if len(word) > 3):
         return "2"
 
     return None
+
+
+async def scroll_page_fully(page):
+    """Scroll to bottom in steps to trigger lazy-loaded sections."""
+    prev_height = -1
+    for _ in range(15):
+        height = await page.evaluate("() => document.body.scrollHeight")
+        if height == prev_height:
+            break
+        prev_height = height
+        await page.evaluate("() => window.scrollTo(0, document.body.scrollHeight)")
+        await page.wait_for_timeout(700)
+    await page.evaluate("() => window.scrollTo(0, 0)")
+    await page.wait_for_timeout(300)
+
+
+async def get_match_links(page):
+    """
+    Extract match links grouped by league section (H2/H3/H4 headings).
+    Returns one link per section first for competition variety, then fills
+    from remaining matches in each section until the caller has enough.
+    """
+    await scroll_page_fully(page)
+
+    result = await page.evaluate("""
+        () => {
+            const groups = {};
+            const groupOrder = [];
+            let currentGroup = '__top__';
+
+            const allEls = document.body.querySelectorAll('h2, h3, h4, a.Prediction');
+            for (const el of allEls) {
+                const tag = el.tagName;
+                if (tag === 'H2' || tag === 'H3' || tag === 'H4') {
+                    const text = el.textContent.trim();
+                    if (text.length > 2 && text.length < 80) {
+                        currentGroup = text;
+                        if (!groups[currentGroup]) {
+                            groups[currentGroup] = [];
+                            groupOrder.push(currentGroup);
+                        }
+                    }
+                } else if (tag === 'A') {
+                    const teamEls = el.querySelectorAll('.Team, div.Team');
+                    const home = teamEls[0] ? teamEls[0].textContent.trim() : '';
+                    const away = teamEls[1] ? teamEls[1].textContent.trim() : '';
+                    const href = el.getAttribute('href') || '';
+                    if (home && away && href) {
+                        if (!groups[currentGroup]) {
+                            groups[currentGroup] = [];
+                            groupOrder.push(currentGroup);
+                        }
+                        groups[currentGroup].push({ home, away, href });
+                    }
+                }
+            }
+            return { groups, groupOrder };
+        }
+    """)
+
+    groups = result.get("groups", {})
+    group_order = result.get("groupOrder", [])
+    total = sum(len(v) for v in groups.values())
+    print(f"[{SITE}] Found {total} prediction link(s) across {len(group_order)} section(s): {group_order}")
+
+    if not groups:
+        return []
+
+    links = []
+    seen_urls = set()
+
+    # Pass 1: first link from each section (variety across competitions)
+    for section in group_order:
+        for item in groups[section]:
+            href = item["href"]
+            url = href if href.startswith("http") else BASE_URL + href
+            if url not in seen_urls:
+                links.append({"home": item["home"], "away": item["away"], "url": url, "section": section})
+                seen_urls.add(url)
+                break  # one per section in pass 1
+
+    # Pass 2: fill remaining slots with second+ matches from each section
+    for section in group_order:
+        if len(links) >= 10:  # generous cap — caller stops at 5
+            break
+        for item in groups[section][1:]:
+            href = item["href"]
+            url = href if href.startswith("http") else BASE_URL + href
+            if url not in seen_urls:
+                links.append({"home": item["home"], "away": item["away"], "url": url, "section": section})
+                seen_urls.add(url)
+
+    return links
+
+
+async def get_match_tip(context, url):
+    """
+    Visit individual match page and return the tip text from
+    div.IndividualTipPrediction > h4
+    """
+    page = await context.new_page()
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2000)
+        tip_el = await page.query_selector("div.IndividualTipPrediction h4")
+        if tip_el:
+            return (await tip_el.inner_text()).strip()
+        return None
+    finally:
+        await page.close()
 
 
 async def scrape():
@@ -119,31 +245,37 @@ async def scrape():
             await page.goto(LISTING_URL, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(2000)
 
-            # Get all featured match links with team names
             match_links = await get_match_links(page)
 
             if not match_links:
                 raise ValueError("No match links found on listing page")
 
-            print(f"[{SITE}] Found {len(match_links)} match links, fetching 1X2 tips...")
+            print(f"[{SITE}] Processing {len(match_links)} candidate match(es)...")
 
             predictions = []
             for match in match_links:
                 if len(predictions) >= 5:
                     break
+                section = match.get("section", "")
                 try:
                     tip = await get_match_tip(context, match["url"])
                     if not tip:
                         print(f"  [{SITE}] No tip found for {match['home']} vs {match['away']}, skipping")
                         continue
 
+                    effective_tip = tip
                     if not is_1x2_tip(tip):
-                        print(f"  [{SITE}] Skipping non-1X2 tip '{tip}' for {match['home']} vs {match['away']}")
-                        continue
+                        # Try to salvage a 1X2 component from compound tips
+                        effective_tip = extract_1x2_component(tip)
+                        if effective_tip:
+                            print(f"  [{SITE}] Compound tip '{tip}' → using 1X2 part '{effective_tip}'")
+                        else:
+                            print(f"  [{SITE}] Skipping non-1X2 tip '{tip}' for {match['home']} vs {match['away']}")
+                            continue
 
-                    prediction = parse_prediction(tip, match["home"], match["away"])
+                    prediction = parse_prediction(effective_tip, match["home"], match["away"])
                     if not prediction:
-                        print(f"  [{SITE}] Could not parse 1X2 tip '{tip}' for {match['home']} vs {match['away']}, skipping")
+                        print(f"  [{SITE}] Could not parse tip '{effective_tip}' for {match['home']} vs {match['away']}, skipping")
                         continue
 
                     predictions.append({
@@ -151,14 +283,14 @@ async def scrape():
                         "away_team": match["away"],
                         "prediction": prediction,
                     })
-                    print(f"  [{SITE}] {match['home']} vs {match['away']} → {prediction} (tip: {tip})")
+                    print(f"  [{SITE}] [{section}] {match['home']} vs {match['away']} → {prediction} (tip: {tip})")
 
                 except Exception as e:
                     print(f"  [{SITE}] Error processing {match.get('home', '?')} vs {match.get('away', '?')}: {e}")
                     continue
 
             if 0 < len(predictions) < 5:
-                print(f"[{SITE}] WARNING: Only {len(predictions)}/5 valid 1X2 predictions found — remaining tips were non-1X2 or unparseable")
+                print(f"[{SITE}] WARNING: Only {len(predictions)}/5 valid 1X2 predictions found — site may have fewer listings today")
 
             if not predictions:
                 html_path = os.path.join(TMP_DIR, f"debug_{SITE}_{run_date}.html")
@@ -189,59 +321,6 @@ async def scrape():
 
         finally:
             await browser.close()
-
-
-async def get_match_links(page):
-    """Extract all match links with team names from the listing page."""
-    links = []
-    anchors = await page.query_selector_all("a.Prediction")
-
-    for anchor in anchors:
-        href = await anchor.get_attribute("href")
-        if not href:
-            continue
-
-        # Full URL
-        url = href if href.startswith("http") else BASE_URL + href
-
-        # Team names are in div.Team elements inside the anchor
-        team_els = await anchor.query_selector_all("div.Team")
-        if len(team_els) >= 2:
-            home = (await team_els[0].inner_text()).strip()
-            away = (await team_els[1].inner_text()).strip()
-        else:
-            # Fallback: parse from href slug "team-a-vs-team-b-predictions-..."
-            slug = href.split("/predictions/")[-1].rstrip("/")
-            if "-vs-" in slug:
-                parts = slug.split("-vs-")[0:2]
-                home = parts[0].replace("-", " ").title()
-                away = parts[1].split("-predictions")[0].replace("-", " ").title()
-            else:
-                continue
-
-        if home and away:
-            links.append({"home": home, "away": away, "url": url})
-
-    return links
-
-
-async def get_match_tip(context, url):
-    """
-    Visit individual match page and return the tip text from
-    div.IndividualTipPrediction > h4
-    """
-    page = await context.new_page()
-    try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-        await page.wait_for_timeout(2000)
-
-        tip_el = await page.query_selector("div.IndividualTipPrediction h4")
-        if tip_el:
-            return (await tip_el.inner_text()).strip()
-
-        return None
-    finally:
-        await page.close()
 
 
 if __name__ == "__main__":
