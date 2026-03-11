@@ -177,11 +177,7 @@ def mode_predictions(service, run_date):
     sheet_id = get_or_create_tab(service, PREDICTIONS_TAB)
     ensure_headers(service, PREDICTIONS_TAB, PREDICTIONS_HEADERS)
 
-    # Current row count (including header) tells us where new rows will land
-    existing = read_tab(service, PREDICTIONS_TAB)
-    base_row = len(existing)  # 0-indexed start index for first new row
-
-    rows_to_append = []
+    rows_to_insert = []
     site_row_ranges = []  # (site, start_0idx, end_0idx)
 
     for site in SITES:
@@ -194,17 +190,18 @@ def mode_predictions(service, run_date):
         with open(path) as f:
             data = json.load(f)
 
-        site_start = base_row + len(rows_to_append)
+        # Row 0 = header, new rows start at index 1; accumulate from there
+        site_start = 1 + len(rows_to_insert)
 
         if data["status"] == "failed":
             print(f"  [{site}] SCRAPE_FAILED — {data.get('error', 'unknown error')}")
             for _ in range(5):
-                rows_to_append.append([run_date, site, "SCRAPE_FAILED", "", "", "", ""])
+                rows_to_insert.append([run_date, site, "SCRAPE_FAILED", "", "", "", ""])
             site_row_ranges.append((site, site_start, site_start + 5))
         else:
             preds = data["predictions"][:5]
             for pred in preds:
-                rows_to_append.append([
+                rows_to_insert.append([
                     run_date,
                     site,
                     pred["home_team"],
@@ -216,18 +213,36 @@ def mode_predictions(service, run_date):
             site_row_ranges.append((site, site_start, site_start + len(preds)))
             print(f"  [{site}] {len(data['predictions'])} predictions loaded")
 
-    if not rows_to_append:
-        print("No rows to append — check that scrapers ran and wrote .tmp/ files.")
+    if not rows_to_insert:
+        print("No rows to insert — check that scrapers ran and wrote .tmp/ files.")
         return
 
-    service.spreadsheets().values().append(
+    num_new = len(rows_to_insert)
+
+    # Insert blank rows immediately after the header (index 1) so new data lands at top
+    service.spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
-        range=f"{PREDICTIONS_TAB}!A1",
-        valueInputOption="RAW",
-        insertDataOption="INSERT_ROWS",
-        body={"values": rows_to_append},
+        body={"requests": [{
+            "insertDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": 1,
+                    "endIndex": 1 + num_new,
+                },
+                "inheritFromBefore": False,
+            }
+        }]},
     ).execute()
-    print(f"\nAppended {len(rows_to_append)} rows to '{PREDICTIONS_TAB}'")
+
+    # Write data into the newly opened rows starting at A2
+    service.spreadsheets().values().update(
+        spreadsheetId=SPREADSHEET_ID,
+        range=f"{PREDICTIONS_TAB}!A2",
+        valueInputOption="RAW",
+        body={"values": rows_to_insert},
+    ).execute()
+    print(f"\nInserted {num_new} rows at top of '{PREDICTIONS_TAB}'")
 
     print(f"[color] Calling apply_site_colors: sheet_id={sheet_id}, ranges={site_row_ranges}")
     try:

@@ -4,7 +4,7 @@
 Scrape the top 5 football predictions from each of 5 sites and write them to the Google Sheet.
 
 ## Schedule
-Run each morning before matches begin (recommended: 08:00 local time).
+Run each morning before matches begin (recommended: 11:00 local time).
 
 ## Required Inputs
 - Today's date (YYYY-MM-DD format, auto-detected by each script)
@@ -33,7 +33,7 @@ python tools/generate_claude_predictions.py
 python tools/update_sheet.py --mode=predictions
 ```
 
-This reads all 6 `.tmp/predictions_{site}_{date}.json` files and appends rows to the "Predictions" tab. Sites that failed will have "SCRAPE_FAILED" written in their prediction cells.
+This reads all 6 `.tmp/predictions_{site}_{date}.json` files and inserts rows at the top of the "Predictions" tab (row 2, just below the header) so the most recent date is always visible first. Sites that failed will have "SCRAPE_FAILED" written in their prediction cells.
 
 ## Expected Output
 - `.tmp/predictions_{site}_{date}.json` for each of 6 sites (5 scrapers + claude)

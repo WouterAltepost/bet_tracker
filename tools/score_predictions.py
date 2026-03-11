@@ -45,36 +45,87 @@ from datetime import date
 from rapidfuzz import fuzz
 
 SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "claude"]
-FUZZY_THRESHOLD = 60
+FUZZY_THRESHOLD = 55
 
-# Known alternate → canonical name mappings (all lowercase, pre-normalized).
+# City words that Vitibet (and occasionally other sites) append to club names.
+# If the last word of a normalized name is in this set, it is stripped.
+CITY_SUFFIXES = {
+    "london", "liverpool", "manchester", "birmingham", "leeds", "newcastle",
+    "madrid", "barcelona", "milan", "torino", "rome", "roma", "paris",
+    "rotterdam", "amsterdam", "lisbon", "lisboa", "porto", "munich",
+    "munchen", "berlin", "dortmund", "glasgow", "edinburgh", "seville",
+    "sevilla", "valencia", "bilbao", "marseille", "brussels", "bergamo",
+    "zagreb", "athens", "bucharest", "prague", "warsaw",
+}
+
+# Known alternate → canonical name mappings (all lowercase, post-normalize form).
 # Expand this dict whenever a new site-specific alias causes persistent UNMATCHED results.
 TEAM_ALIASES = {
     # Eastern European / translated names
-    "crvena zvezda": "red star belgrade",
-    "red star": "red star belgrade",
+    "crvena zvezda":              "red star belgrade",
+    "red star":                   "red star belgrade",
     # UK abbreviations
-    "nott'm forest": "nottingham forest",
-    "nott'm": "nottingham",
-    "wolves": "wolverhampton wanderers",
-    "spurs": "tottenham hotspur",
-    "man city": "manchester city",
-    "man utd": "manchester united",
-    "man united": "manchester united",
-    "sheffield utd": "sheffield united",
-    "sheff utd": "sheffield united",
-    "west brom": "west bromwich albion",
-    "brighton": "brighton hove albion",
-    "brighton & hove albion": "brighton hove albion",
-    "brighton and hove albion": "brighton hove albion",
+    "nott'm forest":              "nottingham forest",
+    "nott forest":                "nottingham forest",
+    "nott'm":                     "nottingham",
+    "wolves":                     "wolverhampton wanderers",
+    "spurs":                      "tottenham hotspur",
+    "man city":                   "manchester city",
+    "man utd":                    "manchester united",
+    "man united":                 "manchester united",
+    "sheffield utd":              "sheffield united",
+    "sheff utd":                  "sheffield united",
+    "west brom":                  "west bromwich albion",
+    "west ham":                   "west ham united",
+    "ham united":                 "west ham united",
+    "brighton":                   "brighton hove albion",
+    "brighton hove albion":       "brighton hove albion",
+    "brighton & hove albion":     "brighton hove albion",
+    "brighton and hove albion":   "brighton hove albion",
+    # German clubs
+    "bayern munich":              "bayern munchen",
+    "fc bayern":                  "bayern munchen",
+    "m gladbach":                 "borussia monchengladbach",
+    "gladbach":                   "borussia monchengladbach",
+    "borussia m gladbach":        "borussia monchengladbach",
+    "borussia monchengladbach":   "borussia monchengladbach",
+    "hertha":                     "hertha berlin",
+    # Dutch clubs
+    "az alkmaar":                 "az",
+    "psv eindhoven":              "psv",
+    # Italian clubs
+    "internazionale":             "inter",
+    "inter milan":                "inter",
+    "lazio roma":                 "lazio",   # after city strip: "ss lazio roma" → "lazio roma" → "lazio"
+    # Spanish clubs
+    "atletico de madrid":         "atletico madrid",
+    "club atletico de madrid":    "atletico madrid",
+    "real betis balompie":        "real betis",
+    "rcd espanyol de barcelona":  "espanyol",
+    "deportivo alaves":           "alaves",
+    "athletic club":              "athletic bilbao",
+    "ca osasuna":                 "osasuna",
     # French clubs
-    "paris saint germain": "psg",
-    "paris saint-germain": "psg",
-    # Vitibet city-suffix variants
-    "aston villa birmingham": "aston villa",
-    "juventus torino": "juventus",
-    "atalanta bergamo": "atalanta",
-    "benfica lisboa": "benfica",
+    "olympique lyonnais":         "olympique lyon",
+    "lyon":                       "olympique lyon",
+    "olympique de marseille":     "olympique marseille",
+    "marseille":                  "olympique marseille",
+    "stade brestois 29":          "brest",
+    "stade brestois":             "brest",
+    "stade rennais":              "rennes",
+    "paris saint germain":        "psg",
+    "paris saint-germain":        "psg",
+    "paris germain":              "psg",    # after 'saint' stripped by abbrev regex
+    # Portuguese clubs
+    "sl benfica":                 "benfica",
+    "sporting cp":                "sporting",
+    "sporting clube de portugal": "sporting",
+    # Vitibet city-suffix variants (resolved by CITY_SUFFIXES stripping, but kept as fallback)
+    "aston villa birmingham":     "aston villa",
+    "juventus torino":            "juventus",
+    "atalanta bergamo":           "atalanta",
+    "benfica lisboa":             "benfica",
+    "everton liverpool":          "everton",
 }
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -117,18 +168,34 @@ def load_results(run_date):
 def normalize(name):
     """Normalize team name for fuzzy comparison.
 
-    Steps: strip accents, lowercase, hyphens→spaces, strip FC/CF-style suffixes,
-    then apply TEAM_ALIASES for known alternate names.
+    Steps:
+      1. Strip accents (Fenerbahçe → Fenerbahce, München → Munchen)
+      2. Lowercase
+      3. Normalise punctuation: hyphens, underscores, apostrophes, dots → spaces
+      4. Strip club-type abbreviations (FC, AFC, BC, SC, …)
+      5. Strip trailing city word if it's a known Vitibet-appended suffix
+      6. Collapse whitespace
+      7. Apply TEAM_ALIASES for known alternate names
     """
-    # Strip accents (Fenerbahçe → Fenerbahce, Crvena → still Crvena)
+    # 1. Strip accents
     n = unicodedata.normalize("NFKD", name)
     n = "".join(c for c in n if not unicodedata.combining(c))
+    # 2. Lowercase
     n = n.lower()
-    n = n.replace("-", " ").replace("_", " ")
-    # Strip common club-type abbreviations that differ across sites
-    n = re.sub(r"\b(fc|cf|sc|ac|rc|bv|sv|vv|if|fk|sk|uk|as|ss|us|cd|sd|rcd|ud)\b", "", n)
+    # 3. Normalise punctuation (apostrophes/dots for M'gladbach, M.gladbach etc.)
+    n = n.replace("-", " ").replace("_", " ").replace("'", " ").replace(".", " ")
+    # 4. Strip common club-type abbreviations that differ across sites
+    n = re.sub(
+        r"\b(afc|bc|fc|cf|sc|ac|rc|bv|sv|vv|if|fk|sk|uk|as|ss|us|cd|sd|rcd|ud|osc|losc|sbv|vfb|vfl|hsv|rb)\b",
+        "",
+        n,
+    )
     n = " ".join(n.split())  # collapse whitespace
-    # Apply known aliases
+    # 5. Strip trailing city word appended by Vitibet (e.g. "Everton Liverpool" → "Everton")
+    words = n.split()
+    if len(words) > 1 and words[-1] in CITY_SUFFIXES:
+        n = " ".join(words[:-1])
+    # 6. Apply known aliases
     n = TEAM_ALIASES.get(n, n)
     return n
 
@@ -136,10 +203,14 @@ def normalize(name):
 def find_result(pred_home, pred_away, results):
     """
     Find the best matching result for a predicted match using fuzzy string matching.
-    Returns the matched result dict or None.
+    Returns (matched_result_or_None, best_score, best_api_home, best_api_away).
+    The debug fields are populated even when no match reaches the threshold, so
+    callers can log what the closest candidate was.
     """
     best_score = 0
     best_match = None
+    best_api_home = ""
+    best_api_away = ""
 
     norm_pred_home = normalize(pred_home)
     norm_pred_away = normalize(pred_away)
@@ -160,10 +231,12 @@ def find_result(pred_home, pred_away, results):
                 if combined > best_score:
                     best_score = combined
                     best_match = r
+                    best_api_home = cand_home
+                    best_api_away = cand_away
 
     if best_score >= FUZZY_THRESHOLD:
-        return best_match
-    return None
+        return best_match, best_score, best_api_home, best_api_away
+    return None, best_score, best_api_home, best_api_away
 
 
 def main():
@@ -190,13 +263,13 @@ def main():
             away = pred["away_team"]
             prediction = pred["prediction"]
 
-            matched = find_result(home, away, results)
+            matched, best_score, best_api_home, best_api_away = find_result(home, away, results)
 
             if matched is None:
                 correct = "UNMATCHED"
                 result_val = "UNMATCHED"
                 summary[site]["unmatched"] += 1
-                print(f"  UNMATCHED: {home} vs {away}")
+                print(f"  UNMATCHED: {home} vs {away} | closest API: '{best_api_home}' vs '{best_api_away}' (score={best_score:.1f})")
             else:
                 result_val = matched["result"] or "?"
                 if result_val == "?":
