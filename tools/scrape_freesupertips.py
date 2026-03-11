@@ -28,6 +28,24 @@ SITE = "freesupertips"
 LISTING_URL = "https://www.freesupertips.com/predictions/"
 BASE_URL = "https://www.freesupertips.com"
 
+# Section heading substrings that indicate leagues not covered by football-data.org free API.
+# If a match's section heading contains any of these (case-insensitive), it is skipped.
+SKIP_SECTIONS = {
+    # English lower leagues
+    "championship", "league one", "league two", "national league", "vanarama",
+    "efl trophy", "fa trophy",
+    # Scottish lower leagues
+    "scottish championship", "scottish league one", "scottish league two",
+    # Other non-API domestic cups / lower tiers
+    "northern ireland", "welsh premier", "northern premier",
+    # South American
+    "argentina", "brazil", "chile", "colombia", "peru", "uruguay",
+    "paraguay", "ecuador", "venezuela", "bolivia", "copa",
+    # Other non-API regions
+    "turkish", "turkish super", "greek", "australian", "chinese",
+    "mls", "major league soccer", "mexican", "saudi", "j-league", "k-league",
+}
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(BASE_DIR, ".tmp")
 
@@ -257,6 +275,13 @@ async def scrape():
                 if len(predictions) >= 5:
                     break
                 section = match.get("section", "")
+
+                # Skip matches from leagues not covered by football-data.org free API
+                section_lower = section.lower()
+                if any(skip in section_lower for skip in SKIP_SECTIONS):
+                    print(f"  [{SITE}] Skipping {match['home']} vs {match['away']} — uncovered league ({section})")
+                    continue
+
                 try:
                     tip = await get_match_tip(context, match["url"])
                     if not tip:

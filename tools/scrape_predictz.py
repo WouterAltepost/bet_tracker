@@ -18,6 +18,18 @@ from playwright.async_api import async_playwright
 SITE = "predictz"
 URL = "https://www.predictz.com/"
 
+# Competition name substrings that indicate leagues not covered by football-data.org free API.
+SKIP_SECTIONS = {
+    # English lower leagues
+    "championship", "league one", "league two", "national league",
+    # South American
+    "argentina", "brazil", "chile", "colombia", "peru", "uruguay",
+    "paraguay", "ecuador", "venezuela", "bolivia", "copa",
+    # Other non-API regions
+    "turkish", "greek", "australian", "chinese", "mls", "mexican", "saudi",
+    "j league", "k league",
+}
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(BASE_DIR, ".tmp")
 
@@ -145,40 +157,68 @@ async def extract_predictions(page):
     Target: tr.pzcnt rows that contain a div.neonboxvsml badge.
     Row structure: [Match Name] [Predicted Score] [H/D/A badge] [View Tip]
     Match name format: "Team A v Team B" — split on " v "
+
+    We walk all <tr> elements in DOM order to track competition section headings
+    (non-pzcnt rows with short text and no " v ") so we can skip uncovered leagues.
     """
+    # Walk all tr elements in order to capture competition heading context
+    raw_items = await page.evaluate("""() => {
+        const items = [];
+        let currentSection = '';
+
+        document.querySelectorAll('tr').forEach(tr => {
+            if (tr.classList.contains('pzcnt')) {
+                const badge = tr.querySelector('div.neonboxvsml');
+                if (!badge) return;
+                const cells = tr.querySelectorAll('td');
+                if (!cells.length) return;
+                items.push({
+                    matchText: cells[0].textContent.trim(),
+                    badgeText: badge.textContent.trim(),
+                    section: currentSection,
+                });
+            } else {
+                // Potential competition header row: short text, no " v " separator
+                const text = tr.textContent.trim().split('\\n')[0].trim();
+                if (text.length > 2 && text.length < 70 && !text.includes(' v ')) {
+                    currentSection = text;
+                }
+            }
+        });
+
+        return items;
+    }""")
+
     predictions = []
-
-    rows = await page.query_selector_all("tr.pzcnt")
-    for row in rows:
-        badge = await row.query_selector("div.neonboxvsml")
-        if not badge:
-            continue
-
-        cells = await row.query_selector_all("td")
-        if not cells:
-            continue
-
-        match_text = (await cells[0].inner_text()).strip()
-        badge_text = (await badge.inner_text()).strip()
+    for item in raw_items:
+        match_text = item.get("matchText", "")
+        badge_text = item.get("badgeText", "")
+        section = item.get("section", "")
 
         prediction = badge_to_prediction(badge_text)
         if not prediction:
             continue
 
-        # Split "Team A v Team B" on " v "
-        if " v " in match_text:
-            parts = match_text.split(" v ", 1)
-            home_team = parts[0].strip()
-            away_team = parts[1].strip()
-        else:
+        if " v " not in match_text:
+            continue
+        parts = match_text.split(" v ", 1)
+        home_team = parts[0].strip()
+        away_team = parts[1].strip()
+        if not home_team or not away_team:
             continue
 
-        if home_team and away_team:
-            predictions.append({
-                "home_team": home_team,
-                "away_team": away_team,
-                "prediction": prediction,
-            })
+        # Skip matches from leagues not covered by football-data.org free API
+        section_lower = section.lower()
+        if any(skip in section_lower for skip in SKIP_SECTIONS):
+            print(f"  [{SITE}] Skipping {home_team} vs {away_team} — uncovered league ({section})")
+            continue
+
+        predictions.append({
+            "home_team": home_team,
+            "away_team": away_team,
+            "prediction": prediction,
+        })
+        print(f"  [{SITE}] [{section}] {home_team} vs {away_team} → {prediction}")
 
     return predictions
 
