@@ -129,6 +129,8 @@ def run_morning():
         ([PYTHON, "tools/scrape_freesupertips.py"],     "scrape_freesupertips"),
         ([PYTHON, "tools/generate_claude_predictions.py"], "generate_claude"),
         ([PYTHON, "tools/update_sheet.py", "--mode=predictions"], "update_sheet"),
+        ([PYTHON, "tools/generate_analysis.py"],              "generate_analysis"),
+        ([PYTHON, "tools/generate_parlay.py"],               "generate_parlay"),
     ]
 
     results = []
@@ -138,11 +140,14 @@ def run_morning():
         results.append(result)
         print(f"[morning] {label} → {result['status']}", flush=True)
 
-    scraper_results = results[:-1]
-    sheet_result = results[-1]
+    scraper_results = results[:-3]  # all scrapers (indices 0-6)
+    sheet_result = results[-3]      # update_sheet
+    # results[-2] is generate_analysis — non-fatal
+    # results[-1] is generate_parlay — non-fatal
 
     # Overall status: ok only if sheet update succeeded
     # (individual scraper failures are expected and handled gracefully)
+    # (analysis failure is non-fatal — predictions are already written)
     if sheet_result["status"] == "ok":
         overall = "ok"
     elif any(r["status"] == "ok" for r in scraper_results):
