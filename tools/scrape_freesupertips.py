@@ -41,9 +41,29 @@ SKIP_SECTIONS = {
     # South American
     "argentina", "brazil", "chile", "colombia", "peru", "uruguay",
     "paraguay", "ecuador", "venezuela", "bolivia", "copa",
+    # North American
+    "mls", "major league", "united states", "usa", "concacaf",
+    "canadian", "liga mx", "mexico",
     # Other non-API regions
     "turkish", "turkish super", "greek", "australian", "chinese",
-    "mls", "major league soccer", "mexican", "saudi", "j-league", "k-league",
+    "mexican", "saudi", "j-league", "k-league", "indian", "middle east",
+}
+
+# Known non-API club names — fallback for when section heading is absent or unrecognised.
+KNOWN_NON_API_CLUBS = {
+    # MLS
+    "inter miami", "nashville sc", "nashville", "la galaxy", "lafc",
+    "seattle sounders", "portland timbers", "atlanta united",
+    "new york city", "new york red bulls", "nycfc", "nyrb",
+    "cf montreal", "toronto fc", "vancouver whitecaps",
+    "colorado rapids", "chicago fire", "fc dallas", "houston dynamo",
+    "real salt lake", "sporting kansas city", "minnesota united",
+    "austin fc", "st louis city", "san jose earthquakes",
+    "dc united", "new england revolution", "philadelphia union",
+    "charlotte fc", "orlando city", "columbus crew", "cincinnati",
+    # Other non-API North/Central American
+    "guadalajara", "monterrey", "tigres", "atlas", "leon",
+    "pachuca", "santos laguna", "toluca",
 }
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -280,6 +300,13 @@ async def scrape():
                 section_lower = section.lower()
                 if any(skip in section_lower for skip in SKIP_SECTIONS):
                     print(f"  [{SITE}] Skipping {match['home']} vs {match['away']} — uncovered league ({section})")
+                    continue
+
+                # Fallback: skip if either team is a known non-API club
+                home_lower = match["home"].lower()
+                away_lower = match["away"].lower()
+                if any(club in home_lower or club in away_lower for club in KNOWN_NON_API_CLUBS):
+                    print(f"  [{SITE}] Skipping {match['home']} vs {match['away']} — known non-API club (section='{section}')")
                     continue
 
                 try:

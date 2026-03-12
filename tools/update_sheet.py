@@ -326,14 +326,15 @@ def rebuild_leaderboard(service, all_rows):
     Rebuild Leaderboard tab with one column per day and an Average column.
 
     Layout:
-      Site | 2026-02-25 | 2026-02-26 | ... | Average
-      forebet | 80% | 60% | ... | 70.0%
+      Site | Average | 2026-03-11 | 2026-03-10 | ...  (newest date first)
+      forebet | 70.0% | 80% | 60% | ...
 
     Each cell = win % for that site on that date (Y / scoreable predictions).
     "—" when no scoreable predictions exist for that site/date.
     Average = mean of non-"—" cells. Rows sorted by Average descending.
+    Rows are colour-coded with the same pastel palette as the Predictions tab.
     """
-    get_or_create_tab(service, LEADERBOARD_TAB)
+    sheet_id = get_or_create_tab(service, LEADERBOARD_TAB)
 
     # Step 1: build per-(date, site) counters
     counters = {}  # { (date, site): {"total": int, "correct": int} }
@@ -362,7 +363,7 @@ def rebuild_leaderboard(service, all_rows):
             if correct_val == "Y":
                 counters[key]["correct"] += 1
 
-    sorted_dates = sorted(all_dates)  # chronological
+    sorted_dates = sorted(all_dates, reverse=True)  # newest first
 
     # Step 2: build one data row per site
     data_rows = []
@@ -386,16 +387,17 @@ def rebuild_leaderboard(service, all_rows):
         else:
             avg_cell = "—"
 
-        data_rows.append([site] + day_pcts + [avg_cell])
+        # Layout: Site | Average | date_newest | date_next | ...
+        data_rows.append([site, avg_cell] + day_pcts)
 
     # Step 3: sort by average descending
     def sort_key(row):
-        avg = row[-1]
+        avg = row[1]  # Average is now column index 1
         return float(avg.replace("%", "")) if avg != "—" else -1
 
     data_rows.sort(key=sort_key, reverse=True)
 
-    header = ["Site"] + sorted_dates + ["Average"]
+    header = ["Site", "Average"] + sorted_dates
 
     # Clear tab first to remove any stale columns from previous formats
     service.spreadsheets().values().clear(
@@ -410,6 +412,34 @@ def rebuild_leaderboard(service, all_rows):
         body={"values": [header] + data_rows},
     ).execute()
     print(f"Leaderboard rebuilt in '{LEADERBOARD_TAB}' ({len(sorted_dates)} day(s))")
+
+    # Step 4: apply per-site pastel row colours (same palette as Predictions tab)
+    num_cols = len(header)
+    color_requests = []
+    for row_idx, row in enumerate(data_rows):
+        site = row[0]
+        color = SITE_COLORS.get(site)
+        if not color:
+            continue
+        color_requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": row_idx + 1,  # +1 to skip header
+                    "endRowIndex": row_idx + 2,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": num_cols,
+                },
+                "cell": {"userEnteredFormat": {"backgroundColor": color}},
+                "fields": "userEnteredFormat.backgroundColor",
+            }
+        })
+    if color_requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": color_requests},
+        ).execute()
+        print(f"  [color] Leaderboard colours applied for {len(color_requests)} row(s)")
 
 
 # ---------------------------------------------------------------------------
