@@ -2,8 +2,10 @@
 server.py — HTTP wrapper for bet_tracker morning/evening runs.
 
 Endpoints:
-  POST /run-morning  — run all 6 predictors and write predictions to Google Sheet
+  POST /run-morning  — kick off all predictors + sheet update in background (returns 202)
   POST /run-evening  — fetch results, score predictions, update sheet + leaderboard
+  GET  /run-morning/status — check the status of the current/last morning run
+  GET  /health       — simple health check
 
 Authentication:
   All endpoints require:  Authorization: Bearer <RAILWAY_API_KEY>
@@ -14,7 +16,8 @@ Designed to be triggered by n8n on a daily schedule.
 import os
 import subprocess
 import sys
-from datetime import date
+import threading
+from datetime import date, datetime
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -27,6 +30,21 @@ API_KEY = os.environ.get("RAILWAY_API_KEY")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PYTHON = sys.executable
 STEP_TIMEOUT = 300  # seconds per script — 5 minutes
+
+
+# ---------------------------------------------------------------------------
+# Morning run state (protected by a lock)
+# ---------------------------------------------------------------------------
+
+_morning_lock = threading.Lock()
+_morning_status = {
+    "state": "idle",       # idle | running | done
+    "date": None,
+    "started_at": None,
+    "finished_at": None,
+    "overall": None,
+    "steps": [],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -102,24 +120,12 @@ def run_step(cmd, label):
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# Morning run background worker
 # ---------------------------------------------------------------------------
 
-@app.route("/run-morning", methods=["POST"])
-def run_morning():
-    """
-    Run all 6 predictors in sequence, then write predictions to Google Sheet.
-
-    Scraper failures are non-fatal — the run continues and SCRAPE_FAILED is
-    written to the sheet for that site. Only update_sheet is skipped if all
-    scrapers failed (nothing to write).
-    """
-    err = check_api_key()
-    if err:
-        return err
-
-    run_date = str(date.today())
-    print(f"[morning] Starting run for {run_date}", flush=True)
+def _run_morning_pipeline(run_date):
+    """Execute the full morning pipeline. Runs in a background thread."""
+    global _morning_status
 
     steps_to_run = [
         ([PYTHON, "tools/scrape_forebet.py"],           "scrape_forebet"),
@@ -140,27 +146,90 @@ def run_morning():
         results.append(result)
         print(f"[morning] {label} → {result['status']}", flush=True)
 
-    scraper_results = results[:-3]  # all scrapers (indices 0-6)
+    scraper_results = results[:-3]  # all scrapers (indices 0-5)
     sheet_result = results[-3]      # update_sheet
-    # results[-2] is generate_analysis — non-fatal
-    # results[-1] is generate_parlay — non-fatal
 
-    # Overall status: ok only if sheet update succeeded
-    # (individual scraper failures are expected and handled gracefully)
-    # (analysis failure is non-fatal — predictions are already written)
     if sheet_result["status"] == "ok":
         overall = "ok"
     elif any(r["status"] == "ok" for r in scraper_results):
-        overall = "partial"  # some scrapers worked, sheet write failed
+        overall = "partial"
     else:
         overall = "error"
+
+    with _morning_lock:
+        _morning_status.update({
+            "state": "done",
+            "overall": overall,
+            "finished_at": datetime.utcnow().isoformat() + "Z",
+            "steps": results,
+        })
+
+    print(f"[morning] Pipeline finished — {overall}", flush=True)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+@app.route("/run-morning", methods=["POST"])
+def run_morning():
+    """
+    Kick off the morning pipeline in a background thread and return 202
+    immediately so n8n doesn't time out.
+
+    Returns 409 if a run is already in progress.
+    """
+    err = check_api_key()
+    if err:
+        return err
+
+    run_date = str(date.today())
+
+    with _morning_lock:
+        if _morning_status["state"] == "running":
+            return jsonify({
+                "error": "Morning run already in progress",
+                "date": _morning_status["date"],
+                "started_at": _morning_status["started_at"],
+            }), 409
+
+        _morning_status.update({
+            "state": "running",
+            "date": run_date,
+            "started_at": datetime.utcnow().isoformat() + "Z",
+            "finished_at": None,
+            "overall": None,
+            "steps": [],
+        })
+
+    print(f"[morning] Starting background run for {run_date}", flush=True)
+    thread = threading.Thread(
+        target=_run_morning_pipeline,
+        args=(run_date,),
+        daemon=True,
+    )
+    thread.start()
 
     return jsonify({
         "date": run_date,
         "run": "morning",
-        "status": overall,
-        "steps": results,
-    })
+        "status": "accepted",
+        "message": "Morning run started in background. Poll /run-morning/status to track progress.",
+    }), 202
+
+
+@app.route("/run-morning/status", methods=["GET"])
+def morning_status():
+    """Check the status of the current/last morning run."""
+    err = check_api_key()
+    if err:
+        return err
+
+    with _morning_lock:
+        return jsonify({
+            "run": "morning",
+            **_morning_status,
+        })
 
 
 @app.route("/run-evening", methods=["POST"])
@@ -170,6 +239,8 @@ def run_evening():
 
     Steps are sequential and dependent: if fetch_results fails, scoring will
     also fail (no results file). All steps always run so every error is reported.
+
+    The evening run is fast (no scrapers/AI), so it runs synchronously.
     """
     err = check_api_key()
     if err:

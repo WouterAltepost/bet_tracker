@@ -33,7 +33,7 @@ from update_sheet import (
 PARLAY_TAB = "Parlay"
 MODEL = "claude-sonnet-4-6"
 MAX_ITERATIONS = 30
-WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 25}
 
 TRACKER_HEADER = [
     "Date", "Leg 1", "Leg 2", "Leg 3",
@@ -182,12 +182,11 @@ def run_agentic_loop(client, run_date, predictions_context):
 
     for iteration in range(MAX_ITERATIONS):
         print(f"  [parlay] API call #{iteration + 1}...", flush=True)
-        response = client.beta.messages.create(
+        response = client.messages.create(
             model=MODEL,
             max_tokens=16000,
             tools=[WEB_SEARCH_TOOL],
             messages=messages,
-            betas=["web-search-2025-03-05"],
         )
 
         block_types = [getattr(b, "type", type(b).__name__) for b in response.content]
@@ -200,6 +199,12 @@ def run_agentic_loop(client, run_date, predictions_context):
                     final_text += block.text
             print(f"  [parlay] Done after {iteration + 1} API call(s)", flush=True)
             return final_text
+
+        if response.stop_reason == "pause_turn":
+            # API paused a long-running turn — pass response back to continue
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": [{"type": "text", "text": "Continue."}]})
+            continue
 
         messages.append({"role": "assistant", "content": response.content})
 

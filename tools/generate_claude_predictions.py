@@ -30,7 +30,7 @@ MAX_ITERATIONS = 10
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(BASE_DIR, ".tmp")
 
-WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search"}
+WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_uses": 10}
 
 PROMPT_TEMPLATE = """\
 Today is {date}.
@@ -117,12 +117,11 @@ def run_agentic_loop(client, run_date):
 
     for iteration in range(MAX_ITERATIONS):
         print(f"  [claude] API call #{iteration + 1}...")
-        response = client.beta.messages.create(
+        response = client.messages.create(
             model=MODEL,
             max_tokens=4096,
             tools=[WEB_SEARCH_TOOL],
             messages=messages,
-            betas=["web-search-2025-03-05"],
         )
 
         block_types = [getattr(b, "type", type(b).__name__) for b in response.content]
@@ -136,6 +135,12 @@ def run_agentic_loop(client, run_date):
                     final_text += block.text
             print(f"  [claude] Done after {iteration + 1} API call(s)")
             return final_text
+
+        if response.stop_reason == "pause_turn":
+            # API paused a long-running turn — pass response back to continue
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": [{"type": "text", "text": "Continue."}]})
+            continue
 
         # Tool use — append assistant turn and continue
         messages.append({"role": "assistant", "content": response.content})
