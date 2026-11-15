@@ -2,37 +2,24 @@
 score_predictions.py — Match predictions to results and score each site.
 
 Reads:
-  .tmp/predictions_{site}_{date}.json  (for each of 5 sites)
-  .tmp/results_{date}.json
+  predictions for the date — from the Google Sheet "Predictions" tab (default,
+  survives server restarts) or from .tmp/predictions_{site}_{date}.json (--source=tmp)
+  .tmp/results_{date}.json  (written by fetch_results.py)
 
-Uses rapidfuzz for fuzzy team name matching (threshold: 60).
-Both long name and short name from the results file are tried.
+Uses rapidfuzz for fuzzy team name matching: BOTH teams must individually
+reach TEAM_THRESHOLD (an average lets one strong name drag a wrong pairing through).
 
 Produces:
-  .tmp/scores_{date}.json
-
-Output format:
-{
-  "date": "2026-02-25",
-  "summary": {
-    "forebet": { "total": 5, "correct": 3, "unmatched": 0 }
-  },
-  "details": [
-    {
-      "site": "forebet",
-      "home_team": "Arsenal",
-      "away_team": "Chelsea",
-      "prediction": "1",
-      "result": "1",
-      "correct": "Y"
-    }
-  ]
-}
+  .tmp/scores_{date}.json  — {"date", "summary": {site: {total, correct, unmatched, pending}}, "details": [...]}
 
 Correct values:
-  "Y"          — prediction matched result
-  "N"          — prediction did not match result
-  "UNMATCHED"  — could not find this match in results (not penalised)
+  "Y" / "N"    — prediction matched / did not match the result
+  "UNMATCHED"  — no result found for this match (not penalised)
+  "VOID"       — match postponed/cancelled/suspended (not penalised)
+  None         — pending: not finished yet, or not found yet but the date is
+                 still recent. Left blank in the sheet and retried next run.
+A date is "final" FINAL_AFTER_DAYS days after it; only then do unresolved
+predictions become UNMATCHED/VOID.
 """
 
 import json
@@ -40,12 +27,24 @@ import os
 import re
 import sys
 import unicodedata
-from datetime import date
+from datetime import date, timedelta
 
 from rapidfuzz import fuzz
 
 SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "claude"]
-FUZZY_THRESHOLD = 55
+# Each team must score at least this (see team_score).
+# Calibrated on Feb/Mar 2026 data: all true matches scored >= 69 per team; the
+# old average-of-two >= 55 rule matched 'Preston v Millwall' to 'Cremonese v AC Milan'.
+TEAM_THRESHOLD = 65
+FINAL_AFTER_DAYS = 2
+VOID_STATUSES = {"POSTPONED", "CANCELLED", "SUSPENDED", "AWARDED"}
+
+# Tokens that mark a different team from the senior men's side. Both names must
+# carry the same markers ("Brighton Women" must never match "Brighton").
+SIDE_MARKERS = {
+    "women", "w", "ladies", "fem", "femenino", "feminine", "frauen", "dames",
+    "u17", "u18", "u19", "u20", "u21", "u23", "youth", "ii", "b", "reserves", "res", "jong",
+}
 
 # City words that Vitibet (and occasionally other sites) append to club names.
 # If the last word of a normalized name is in this set, it is stripped.
@@ -56,6 +55,14 @@ CITY_SUFFIXES = {
     "munchen", "berlin", "dortmund", "glasgow", "edinburgh", "seville",
     "sevilla", "valencia", "bilbao", "marseille", "brussels", "bergamo",
     "zagreb", "athens", "bucharest", "prague", "warsaw",
+}
+
+# Words that don't identify a club on their own ("Real", "Inter", "United"...).
+# A name is never cut down to only these, and they don't earn the subset bonus.
+GENERIC_WORDS = {
+    "real", "inter", "united", "city", "club", "sporting", "athletic", "atletico",
+    "racing", "deportivo", "olympique", "dynamo", "dinamo", "young", "royal",
+    "sport", "sports", "town", "county", "rovers", "wanderers", "albion", "de", "la",
 }
 
 # Known alternate → canonical name mappings (all lowercase, post-normalize form).
@@ -93,9 +100,13 @@ TEAM_ALIASES = {
     # Dutch clubs
     "az alkmaar":                 "az",
     "psv eindhoven":              "psv",
+    "nijmegen":                   "nec",
+    "nec nijmegen":               "nec",
     # Italian clubs
     "internazionale":             "inter",
     "inter milan":                "inter",
+    "internazionale milano":      "inter",
+    "inter milano":               "inter",
     "lazio roma":                 "lazio",   # after city strip: "ss lazio roma" → "lazio roma" → "lazio"
     # Spanish clubs
     "atletico de madrid":         "atletico madrid",
@@ -132,7 +143,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(BASE_DIR, ".tmp")
 
 
-def load_predictions(run_date):
+def load_predictions_from_tmp(run_date):
     """Load all site prediction files. Returns dict: site -> predictions list."""
     all_preds = {}
     for site in SITES:
@@ -148,6 +159,27 @@ def load_predictions(run_date):
             all_preds[site] = []
         else:
             all_preds[site] = data["predictions"]
+    return all_preds
+
+
+def load_predictions_from_rows(all_rows, run_date):
+    """
+    Predictions for run_date from Predictions-tab rows (header included).
+    Duplicate rows (same date/site/home/away) are returned once.
+    Returns dict: site -> predictions list.
+    """
+    all_preds = {site: [] for site in SITES}
+    seen = set()
+    for row in all_rows[1:]:
+        if len(row) < 5 or row[0] != run_date or row[1] not in all_preds:
+            continue
+        if row[2] == "SCRAPE_FAILED" or row[4] not in ("1", "X", "2"):
+            continue
+        key = tuple(row[:4])
+        if key in seen:
+            continue
+        seen.add(key)
+        all_preds[row[1]].append({"home_team": row[2], "away_team": row[3], "prediction": row[4]})
     return all_preds
 
 
@@ -193,27 +225,51 @@ def normalize(name):
     n = " ".join(n.split())  # collapse whitespace
     # 5. Strip trailing city word appended by Vitibet (e.g. "Everton Liverpool" → "Everton")
     words = n.split()
-    if len(words) > 1 and words[-1] in CITY_SUFFIXES:
+    if len(words) > 1 and words[-1] in CITY_SUFFIXES and not set(words[:-1]) <= GENERIC_WORDS:
         n = " ".join(words[:-1])
     # 6. Apply known aliases
     n = TEAM_ALIASES.get(n, n)
     return n
 
 
+def side_markers(name):
+    words = re.sub(r"[^a-z0-9 ]", " ", name.lower()).split()
+    return {w for w in words if w in SIDE_MARKERS}
+
+
+def team_score(pred_raw, cand_raw):
+    """
+    Similarity 0-100 between a scraped team name and an API team name.
+    token_sort_ratio on normalized names, but a name whose words are all contained
+    in the other ("Leeds" vs "Leeds United") scores at least 90, unless the shorter
+    one is only generic words ("Real" vs "Real Sociedad"). Names with
+    different women/youth/reserve markers score 0.
+    """
+    if side_markers(pred_raw) != side_markers(cand_raw):
+        return 0
+    a, b = normalize(pred_raw), normalize(cand_raw)
+    if not a or not b:
+        return 0
+    score = fuzz.token_sort_ratio(a, b)
+    shorter = min(a.split(), b.split(), key=len)
+    if not set(shorter) <= GENERIC_WORDS:
+        score = max(score, fuzz.token_set_ratio(a, b) - 10)
+    return score
+
+
 def find_result(pred_home, pred_away, results):
     """
     Find the best matching result for a predicted match using fuzzy string matching.
-    Returns (matched_result_or_None, best_score, best_api_home, best_api_away).
-    The debug fields are populated even when no match reaches the threshold, so
-    callers can log what the closest candidate was.
+    Candidates are ranked by their weaker team score (then the average), and are
+    accepted only if both teams reach TEAM_THRESHOLD.
+    Returns (matched_result_or_None, best_score, best_api_home, best_api_away);
+    best_score is the weaker-team score. Debug fields are populated even when
+    nothing reaches the threshold, so callers can log the closest candidate.
     """
-    best_score = 0
+    best_key = (-1, -1)
     best_match = None
     best_api_home = ""
     best_api_away = ""
-
-    norm_pred_home = normalize(pred_home)
-    norm_pred_away = normalize(pred_away)
 
     for r in results:
         # Build candidate name strings — try both full and short names
@@ -224,63 +280,61 @@ def find_result(pred_home, pred_away, results):
             for cand_away in candidates_away:
                 if not cand_home or not cand_away:
                     continue
-                score_h = fuzz.token_sort_ratio(norm_pred_home, normalize(cand_home))
-                score_a = fuzz.token_sort_ratio(norm_pred_away, normalize(cand_away))
-                combined = (score_h + score_a) / 2
+                score_h = team_score(pred_home, cand_home)
+                score_a = team_score(pred_away, cand_away)
+                key = (min(score_h, score_a), (score_h + score_a) / 2)
 
-                if combined > best_score:
-                    best_score = combined
+                if key > best_key:
+                    best_key = key
                     best_match = r
                     best_api_home = cand_home
                     best_api_away = cand_away
 
-    if best_score >= FUZZY_THRESHOLD:
+    best_score = best_key[0]
+    if best_score >= TEAM_THRESHOLD:
         return best_match, best_score, best_api_home, best_api_away
     return None, best_score, best_api_home, best_api_away
 
 
-def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--date", default=str(date.today()), help="Date in YYYY-MM-DD format")
-    args = parser.parse_args()
-    run_date = args.date
-    print(f"score_predictions.py — date={run_date}")
+def is_final(run_date, today=None):
+    today = today or date.today()
+    return date.fromisoformat(run_date) <= today - timedelta(days=FINAL_AFTER_DAYS)
 
-    all_predictions = load_predictions(run_date)
-    results = load_results(run_date)
-    print(f"Loaded {len(results)} results from results file")
 
+def score(all_predictions, results, final):
+    """Score every prediction. Returns (summary, details); see module docstring."""
     details = []
-    summary = {site: {"total": 0, "correct": 0, "unmatched": 0} for site in SITES}
+    summary = {site: {"total": 0, "correct": 0, "unmatched": 0, "pending": 0} for site in SITES}
 
     for site in SITES:
         preds = all_predictions.get(site, [])
-        print(f"\n[{site}] Scoring {len(preds)} predictions...")
+        if preds:
+            print(f"\n[{site}] Scoring {len(preds)} predictions...")
 
         for pred in preds:
-            home = pred["home_team"]
-            away = pred["away_team"]
-            prediction = pred["prediction"]
-
+            home, away, prediction = pred["home_team"], pred["away_team"], pred["prediction"]
             matched, best_score, best_api_home, best_api_away = find_result(home, away, results)
+            status = (matched or {}).get("status", "FINISHED")
 
-            if matched is None:
-                correct = "UNMATCHED"
-                result_val = "UNMATCHED"
+            if matched is not None and matched.get("result"):
+                result_val = matched["result"]
+                correct = "Y" if prediction == result_val else "N"
+                summary[site]["total"] += 1
+                summary[site]["correct"] += correct == "Y"
+                print(f"  {home} vs {away} | pred={prediction} result={result_val} → {correct}")
+            elif not final:
+                result_val, correct = None, None
+                summary[site]["pending"] += 1
+                why = f"status {status}" if matched is not None else f"not found yet (closest '{best_api_home}' vs '{best_api_away}', {best_score:.0f})"
+                print(f"  PENDING: {home} vs {away} — {why}")
+            elif matched is not None and status in VOID_STATUSES:
+                result_val, correct = status, "VOID"
+                summary[site]["unmatched"] += 1
+                print(f"  VOID: {home} vs {away} — {status}")
+            else:
+                result_val, correct = "UNMATCHED", "UNMATCHED"
                 summary[site]["unmatched"] += 1
                 print(f"  UNMATCHED: {home} vs {away} | closest API: '{best_api_home}' vs '{best_api_away}' (score={best_score:.1f})")
-            else:
-                result_val = matched["result"] or "?"
-                if result_val == "?":
-                    correct = "UNMATCHED"
-                    summary[site]["unmatched"] += 1
-                else:
-                    correct = "Y" if prediction == result_val else "N"
-                    summary[site]["total"] += 1
-                    if correct == "Y":
-                        summary[site]["correct"] += 1
-                    print(f"  {home} vs {away} | pred={prediction} result={result_val} → {correct}")
 
             details.append({
                 "site": site,
@@ -293,20 +347,40 @@ def main():
 
         s = summary[site]
         if s["total"] > 0:
-            pct = s["correct"] / s["total"] * 100
-            print(f"  [{site}] {s['correct']}/{s['total']} correct ({pct:.0f}%), {s['unmatched']} unmatched")
+            print(f"  [{site}] {s['correct']}/{s['total']} correct ({s['correct'] / s['total'] * 100:.0f}%), "
+                  f"{s['unmatched']} unmatched, {s['pending']} pending")
 
-    output = {
-        "date": run_date,
-        "summary": summary,
-        "details": details,
-    }
+    return summary, details
 
-    path = os.path.join(TMP_DIR, f"scores_{run_date}.json")
+
+def write_scores(run_date, summary, details):
     os.makedirs(TMP_DIR, exist_ok=True)
+    path = os.path.join(TMP_DIR, f"scores_{run_date}.json")
     with open(path, "w") as f:
-        json.dump(output, f, indent=2, ensure_ascii=False)
-    print(f"\nScores written to {path}")
+        json.dump({"date": run_date, "summary": summary, "details": details}, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--date", default=str(date.today()), help="Date in YYYY-MM-DD format")
+    parser.add_argument("--source", choices=["sheet", "tmp"], default="sheet",
+                        help="Where to read the predictions from (default: the Google Sheet)")
+    args = parser.parse_args()
+    run_date = args.date
+    print(f"score_predictions.py — date={run_date}, source={args.source}")
+
+    if args.source == "sheet":
+        from update_sheet import PREDICTIONS_TAB, get_service, read_tab
+        all_predictions = load_predictions_from_rows(read_tab(get_service(), PREDICTIONS_TAB), run_date)
+    else:
+        all_predictions = load_predictions_from_tmp(run_date)
+    results = load_results(run_date)
+    print(f"Loaded {len(results)} results from results file")
+
+    summary, details = score(all_predictions, results, is_final(run_date))
+    print(f"\nScores written to {write_scores(run_date, summary, details)}")
 
 
 if __name__ == "__main__":

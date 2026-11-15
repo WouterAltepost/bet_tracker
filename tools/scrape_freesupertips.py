@@ -20,6 +20,7 @@ Output: .tmp/predictions_freesupertips_{date}.json
 import asyncio
 import json
 import os
+import re
 from datetime import date
 
 from playwright.async_api import async_playwright
@@ -28,42 +29,14 @@ SITE = "freesupertips"
 LISTING_URL = "https://www.freesupertips.com/predictions/"
 BASE_URL = "https://www.freesupertips.com"
 
-# Section heading substrings that indicate leagues not covered by football-data.org free API.
-# If a match's section heading contains any of these (case-insensitive), it is skipped.
+# Section heading substrings we never pick from. Results come from football-data
+# + ESPN, which together cover almost every senior men's league the site tips
+# (English lower leagues, Scotland, MLS, Liga MX, Turkey, Saudi, South America...),
+# so only women's / youth fixtures are skipped — ESPN doesn't label those teams
+# reliably, which risks matching them against the men's side.
 SKIP_SECTIONS = {
-    # English lower leagues
-    "championship", "league one", "league two", "national league", "vanarama",
-    "efl trophy", "fa trophy",
-    # Scottish lower leagues
-    "scottish championship", "scottish league one", "scottish league two",
-    # Other non-API domestic cups / lower tiers
-    "northern ireland", "welsh premier", "northern premier",
-    # South American
-    "argentina", "brazil", "chile", "colombia", "peru", "uruguay",
-    "paraguay", "ecuador", "venezuela", "bolivia", "copa",
-    # North American
-    "mls", "major league", "united states", "usa", "concacaf",
-    "canadian", "liga mx", "mexico",
-    # Other non-API regions
-    "turkish", "turkish super", "greek", "australian", "chinese",
-    "mexican", "saudi", "j-league", "k-league", "indian", "middle east",
-}
-
-# Known non-API club names — fallback for when section heading is absent or unrecognised.
-KNOWN_NON_API_CLUBS = {
-    # MLS
-    "inter miami", "nashville sc", "nashville", "la galaxy", "lafc",
-    "seattle sounders", "portland timbers", "atlanta united",
-    "new york city", "new york red bulls", "nycfc", "nyrb",
-    "cf montreal", "toronto fc", "vancouver whitecaps",
-    "colorado rapids", "chicago fire", "fc dallas", "houston dynamo",
-    "real salt lake", "sporting kansas city", "minnesota united",
-    "austin fc", "st louis city", "san jose earthquakes",
-    "dc united", "new england revolution", "philadelphia union",
-    "charlotte fc", "orlando city", "columbus crew", "cincinnati",
-    # Other non-API North/Central American
-    "guadalajara", "monterrey", "tigres", "atlas", "leon",
-    "pachuca", "santos laguna", "toluca",
+    "women", "womens", "ladies", "femenin", "frauen", "wsl", "nwsl",
+    "u17", "u18", "u19", "u20", "u21", "u23", "youth", "premier league 2",
 }
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -247,19 +220,42 @@ async def get_match_links(page):
     return links
 
 
-async def get_match_tip(context, url):
+MONTHS = ["january", "february", "march", "april", "may", "june", "july",
+          "august", "september", "october", "november", "december"]
+KICKOFF_DATE_RE = re.compile(
+    r"\b(?:mon|tues|wednes|thurs|fri|satur|sun)day\s+(\d{1,2})(?:st|nd|rd|th)?\s+(" + "|".join(MONTHS) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def kickoff_matches_date(page_text, run_date):
     """
-    Visit individual match page and return the tip text from
-    div.IndividualTipPrediction > h4
+    The listing only shows kick-off times, and it can include matches on later
+    days. The detail page states the day (e.g. "Sunday 15th November"); the first
+    such phrase on the page belongs to the match itself.
+    Returns True/False, or None when no date phrase was found.
+    """
+    m = KICKOFF_DATE_RE.search(page_text or "")
+    if not m:
+        return None
+    d = date.fromisoformat(run_date)
+    return int(m.group(1)) == d.day and MONTHS.index(m.group(2).lower()) + 1 == d.month
+
+
+async def get_match_tip(context, url, run_date):
+    """
+    Visit individual match page and return (tip_text, is_today) where tip_text
+    comes from div.IndividualTipPrediction > h4 and is_today is True/False/None.
     """
     page = await context.new_page()
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_timeout(2000)
+        is_today = kickoff_matches_date(await page.evaluate("() => document.body.innerText"), run_date)
         tip_el = await page.query_selector("div.IndividualTipPrediction h4")
         if tip_el:
-            return (await tip_el.inner_text()).strip()
-        return None
+            return (await tip_el.inner_text()).strip(), is_today
+        return None, is_today
     finally:
         await page.close()
 
@@ -296,21 +292,17 @@ async def scrape():
                     break
                 section = match.get("section", "")
 
-                # Skip matches from leagues not covered by football-data.org free API
+                # Skip women's / youth fixtures
                 section_lower = section.lower()
                 if any(skip in section_lower for skip in SKIP_SECTIONS):
-                    print(f"  [{SITE}] Skipping {match['home']} vs {match['away']} — uncovered league ({section})")
-                    continue
-
-                # Fallback: skip if either team is a known non-API club
-                home_lower = match["home"].lower()
-                away_lower = match["away"].lower()
-                if any(club in home_lower or club in away_lower for club in KNOWN_NON_API_CLUBS):
-                    print(f"  [{SITE}] Skipping {match['home']} vs {match['away']} — known non-API club (section='{section}')")
+                    print(f"  [{SITE}] Skipping {match['home']} vs {match['away']} — skipped section ({section})")
                     continue
 
                 try:
-                    tip = await get_match_tip(context, match["url"])
+                    tip, is_today = await get_match_tip(context, match["url"], run_date)
+                    if is_today is False:
+                        print(f"  [{SITE}] Skipping {match['home']} vs {match['away']} — not played today")
+                        continue
                     if not tip:
                         print(f"  [{SITE}] No tip found for {match['home']} vs {match['away']}, skipping")
                         continue

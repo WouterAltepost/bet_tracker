@@ -21,7 +21,8 @@ This system automates the tracking of football match predictions from 5 websites
 
 **External APIs:**
 - `football-data.org` — Free API for fetching real match results. API key stored in `.env` as `FOOTBALL_DATA_API_KEY`
-- Google Sheets API — For reading and writing the tracker spreadsheet. Credentials stored in `credentials.json` and `token.json` (both gitignored)
+- ESPN public scoreboard — second results source (no key), merged with football-data for broad league coverage
+- Google Sheets API — For reading and writing the tracker spreadsheet. Preferred: service account (`service_account.json` / env `GOOGLE_SERVICE_ACCOUNT_JSON`); fallback OAuth `credentials.json` + `token.json` (all gitignored)
 
 ## The WAT Architecture
 
@@ -88,7 +89,8 @@ tools/
   scrape_onemillion.py  # Playwright scraper for OneMillion
   scrape_vitibet.py     # Playwright scraper for Vitibet
   scrape_freesupertips.py # Playwright scraper for FreeSuperTips
-  fetch_results.py      # Fetches real match results from football-data.org
+  run_evening.py        # Evening run: scores all pending dates from the sheet + rebuilds leaderboard
+  fetch_results.py      # Fetches real match results (football-data.org + ESPN)
   score_predictions.py  # Compares predictions to results, calculates scores
   update_sheet.py       # Reads/writes data to Google Sheets
 workflows/

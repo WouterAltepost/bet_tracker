@@ -189,7 +189,7 @@ def generate_commentary(consensus, leaderboard, run_date):
 
 {chr(10).join(picks_text)}
 
-Current leaderboard standings (average win %):
+Current leaderboard standings (overall win %):
 {lb_text}
 
 Write a brief 3-4 sentence analysis covering:

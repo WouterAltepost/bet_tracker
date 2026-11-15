@@ -102,3 +102,12 @@ On failure: `"status": "failed"`, `"error": "<message>"`, `"predictions": []`
 - Playwright must be installed (`playwright install chromium`) for scrapers to work
 - Run `playwright install chromium` once if browsers aren't installed yet
 - If a site changes its layout and the scraper breaks, check the selector in the relevant `scrape_*.py` script and update it
+
+## Scraper notes (Nov 2026)
+- **"Top 5" definition (agreed 2026-11-15):** each site's most confident picks for today, in leagues the results sources can score. Forebet: ranked by the probability it gives its own pick. Vitibet: big leagues first, then |INDEX|. PredictZ and FreeSuperTips publish no confidence number, so their own listing order is used. Women's/youth fixtures are skipped everywhere. Since ESPN was added as a results source, the old league skip lists (English lower leagues, Scotland, MLS, Turkey…) were removed.
+- **Vitibet** redesigned its quick-tips page into a livescore-style list (`a.livescore-match-row` with INDEX, 1/X/2 %, tip badge). Top 5 = today's not-yet-started matches sorted by |INDEX| (Vitibet's own "sort by INDEX"), preferring leagues football-data.org can score. Prediction = Vitibet's highest 1/X/2 %. League ids in `data-lid` are API-Football ids.
+- **PredictZ** homepage stacks Today's / Tomorrow's / Next Upcoming tips; only the "Today's Tips" block is used.
+- **Forebet** homepage can include other days; rows are filtered on `time[itemprop=startDate]`.
+- **FreeSuperTips** listing shows only kick-off times; the detail page's "Sunday 15th November" phrase is used to drop matches not played today. Many of its tips are BTTS/goals, so it often yields fewer than 5 1X2 picks.
+- **OneMillion** moved its homepage picks behind a paywall ("Premium Prediction → Get Access"); the scraper fails until a replacement is decided. (The old scraper used the lowest bookmaker odds, not the site's own tip.)
+- Running the morning sheet write twice no longer duplicates rows: sites that already have rows for the date are skipped.

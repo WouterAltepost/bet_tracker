@@ -3,7 +3,7 @@ server.py — HTTP wrapper for bet_tracker morning/evening runs.
 
 Endpoints:
   POST /run-morning  — kick off all predictors + sheet update in background (returns 202)
-  POST /run-evening  — fetch results, score predictions, update sheet + leaderboard
+  POST /run-evening  — score all pending predictions (with catch-up), update sheet + leaderboard
   GET  /run-morning/status — check the status of the current/last morning run
   GET  /health       — simple health check
 
@@ -82,7 +82,7 @@ def check_api_key():
     return None
 
 
-def run_step(cmd, label):
+def run_step(cmd, label, timeout=STEP_TIMEOUT):
     """
     Run a subprocess command and return a result dict.
     Never raises — all errors are captured and returned in the dict.
@@ -93,7 +93,7 @@ def run_step(cmd, label):
             capture_output=True,
             text=True,
             cwd=BASE_DIR,
-            timeout=STEP_TIMEOUT,
+            timeout=timeout,
         )
         # Combine stdout + stderr; keep last 3000 chars to avoid huge responses
         combined = (result.stdout or "") + (result.stderr or "")
@@ -108,7 +108,7 @@ def run_step(cmd, label):
             "step": label,
             "status": "timeout",
             "returncode": -1,
-            "output": f"Timed out after {STEP_TIMEOUT}s",
+            "output": f"Timed out after {timeout}s",
         }
     except Exception as exc:
         return {
@@ -235,12 +235,11 @@ def morning_status():
 @app.route("/run-evening", methods=["POST"])
 def run_evening():
     """
-    Fetch results → score predictions → update sheet + rebuild leaderboard.
+    Score every date that still has unscored predictions in the sheet (catching
+    up missed evenings), then rebuild the leaderboard. See tools/run_evening.py.
 
-    Steps are sequential and dependent: if fetch_results fails, scoring will
-    also fail (no results file). All steps always run so every error is reported.
-
-    The evening run is fast (no scrapers/AI), so it runs synchronously.
+    Predictions are read from the Google Sheet, so this works even if the
+    server restarted since the morning run. Runs synchronously.
     """
     err = check_api_key()
     if err:
@@ -249,18 +248,10 @@ def run_evening():
     run_date = str(date.today())
     print(f"[evening] Starting run for {run_date}", flush=True)
 
-    steps_to_run = [
-        ([PYTHON, "tools/fetch_results.py"],               "fetch_results"),
-        ([PYTHON, "tools/score_predictions.py"],           "score_predictions"),
-        ([PYTHON, "tools/update_sheet.py", "--mode=results"], "update_sheet"),
-    ]
-
-    results = []
-    for cmd, label in steps_to_run:
-        print(f"[evening] Running {label}...", flush=True)
-        result = run_step(cmd, label)
-        results.append(result)
-        print(f"[evening] {label} → {result['status']}", flush=True)
+    # Allow extra time: catching up several days pauses ~7s per date for the API rate limit.
+    result = run_step([PYTHON, "tools/run_evening.py"], "run_evening", timeout=900)
+    results = [result]
+    print(f"[evening] run_evening → {result['status']}", flush=True)
 
     overall = "ok" if all(r["status"] == "ok" for r in results) else "error"
 

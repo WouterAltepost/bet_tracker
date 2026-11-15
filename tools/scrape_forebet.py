@@ -19,6 +19,9 @@ from playwright.async_api import async_playwright
 SITE = "forebet"
 URL = "https://www.forebet.com/"
 
+# Fixtures we never pick (results sources don't separate these from senior men's sides reliably).
+SKIP_KEYWORDS = ("women", "femen", "frauen", "u17", "u18", "u19", "u20", "u21", "u23", "youth")
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP_DIR = os.path.join(BASE_DIR, ".tmp")
 
@@ -57,7 +60,7 @@ async def scrape():
             await page.goto(URL, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(3000)
 
-            predictions = await extract_predictions(page)
+            predictions = await extract_predictions(page, run_date)
 
             if not predictions:
                 html_path = os.path.join(TMP_DIR, f"debug_{SITE}_{run_date}.html")
@@ -90,42 +93,61 @@ async def scrape():
             await browser.close()
 
 
-async def extract_predictions(page):
+async def extract_predictions(page, run_date):
     """
     Target: div.rcnt elements (each is a match prediction row).
     Each row contains:
-      span.homeTeam  — home team
-      span.awayTeam  — away team
-      span.forepr    — 1/X/2 prediction
+      span.homeTeam / span.awayTeam — teams
+      span.forepr                   — 1/X/2 prediction
+      .fprc span x3                 — Forebet's 1/X/2 probabilities (%)
+      time[itemprop=startDate]      — match date (YYYY-MM-DD)
+      .shortagDiv img[onclick]      — getstag(..., 'League name', ...)
+
+    "Top 5" = today's matches ranked by the probability Forebet gives its own
+    pick (most confident first). Women's/youth fixtures are skipped.
     """
+    rows = await page.evaluate("""() => [...document.querySelectorAll('div.rcnt')].map(r => {
+        const t = s => (r.querySelector(s) || {}).textContent || '';
+        const time = r.querySelector("time[itemprop='startDate']");
+        const tag = r.querySelector('.shortagDiv img[onclick]');
+        const m = tag ? tag.getAttribute('onclick').match(/getstag\\([^,]*,[^,]*,'([^']*)','([^']*)'/) : null;
+        return {
+            home: t('span.homeTeam').trim(),
+            away: t('span.awayTeam').trim(),
+            pred: t('span.forepr').trim().toUpperCase(),
+            date: time ? time.getAttribute('datetime') : null,
+            probs: [...r.querySelectorAll('.fprc span')].map(x => parseInt(x.textContent, 10)),
+            league: m ? (m[1] ? m[1] + ' ' : '') + m[2] : '',
+        };
+    })""")
+
     predictions = []
-
-    rows = await page.query_selector_all("div.rcnt")
-    for row in rows:
-        home_el = await row.query_selector("span.homeTeam")
-        away_el = await row.query_selector("span.awayTeam")
-        pred_el = await row.query_selector("span.forepr")
-
-        if not home_el or not away_el or not pred_el:
+    seen = set()
+    for r in rows:
+        home_team, away_team, prediction = r["home"], r["away"], r["pred"]
+        if not home_team or not away_team or prediction not in ("1", "X", "2"):
             continue
-
-        home_team = (await home_el.inner_text()).strip()
-        away_team = (await away_el.inner_text()).strip()
-        prediction = (await pred_el.inner_text()).strip().upper()
-
-        if not home_team or not away_team:
+        # The homepage can include matches from other days — keep today's only.
+        if r["date"] and r["date"][:10] != run_date:
             continue
-
-        # Normalise to 1/X/2
-        if prediction not in ("1", "X", "2"):
+        if any(k in f"{r['league']} {home_team} {away_team}".lower() for k in SKIP_KEYWORDS):
             continue
-
+        if (home_team, away_team) in seen:
+            continue
+        seen.add((home_team, away_team))
+        probs = r["probs"] if len(r["probs"]) == 3 else [0, 0, 0]
+        confidence = probs["1X2".index(prediction)]
         predictions.append({
             "home_team": home_team,
             "away_team": away_team,
             "prediction": prediction,
+            "confidence": confidence,
+            "league": r["league"],
         })
 
+    predictions.sort(key=lambda p: -p["confidence"])  # stable: page order breaks ties
+    for p in predictions[:5]:
+        print(f"  [{SITE}] {p['confidence']}% {p['home_team']} vs {p['away_team']} → {p['prediction']} ({p['league']})")
     return predictions
 
 

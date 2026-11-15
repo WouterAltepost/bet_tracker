@@ -18,37 +18,14 @@ from playwright.async_api import async_playwright
 SITE = "predictz"
 URL = "https://www.predictz.com/"
 
-# Competition name substrings that indicate leagues not covered by football-data.org free API.
+# Section heading substrings we never pick from. Results come from football-data
+# + ESPN, which together cover almost every senior men's league the site tips
+# (English lower leagues, Scotland, MLS, Liga MX, Turkey, Saudi, South America...),
+# so only women's / youth fixtures are skipped — ESPN doesn't label those teams
+# reliably, which risks matching them against the men's side.
 SKIP_SECTIONS = {
-    # English lower leagues
-    "championship", "league one", "league two", "national league",
-    # South American
-    "argentina", "brazil", "chile", "colombia", "peru", "uruguay",
-    "paraguay", "ecuador", "venezuela", "bolivia", "copa",
-    # North American
-    "mls", "major league", "united states", "usa", "concacaf",
-    "canadian", "liga mx", "mexico",
-    # Other non-API regions
-    "turkish", "greek", "australian", "chinese", "mexican", "saudi",
-    "j league", "k league", "indian", "middle east",
-}
-
-# Known non-API club names. Used as a fallback when section detection fails
-# (e.g. the PredictZ heading heuristic returns an empty string).
-KNOWN_NON_API_CLUBS = {
-    # MLS
-    "inter miami", "nashville sc", "nashville", "la galaxy", "lafc",
-    "seattle sounders", "portland timbers", "atlanta united",
-    "new york city", "new york red bulls", "nycfc", "nyrb",
-    "cf montreal", "toronto fc", "vancouver whitecaps",
-    "colorado rapids", "chicago fire", "fc dallas", "houston dynamo",
-    "real salt lake", "sporting kansas city", "minnesota united",
-    "austin fc", "st louis city", "san jose earthquakes",
-    "dc united", "new england revolution", "philadelphia union",
-    "charlotte fc", "orlando city", "columbus crew", "cincinnati",
-    # Other non-API North/Central American
-    "guadalajara", "monterrey", "tigres", "america", "atlas",
-    "leon", "pachuca", "santos laguna", "toluca",
+    "women", "womens", "ladies", "femenin", "frauen", "wsl", "nwsl",
+    "u17", "u18", "u19", "u20", "u21", "u23", "youth", "premier league 2",
 }
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -179,15 +156,24 @@ async def extract_predictions(page):
     Row structure: [Match Name] [Predicted Score] [H/D/A badge] [View Tip]
     Match name format: "Team A v Team B" — split on " v "
 
-    We walk all <tr> elements in DOM order to track competition section headings
+    We walk <h2> and <tr> elements in DOM order: <h2> marks the day block
+    (only "Today's Tips" is used), and to track competition section headings
     (non-pzcnt rows with short text and no " v ") so we can skip uncovered leagues.
     """
     # Walk all tr elements in order to capture competition heading context
     raw_items = await page.evaluate("""() => {
         const items = [];
         let currentSection = '';
+        // The homepage stacks "Today's Tips", "Tomorrow's Tips" and "Next Upcoming
+        // Tips" (plus accumulators above them). Only collect rows under Today's Tips.
+        let dayBlock = '';
 
-        document.querySelectorAll('tr').forEach(tr => {
+        document.querySelectorAll('h2, tr').forEach(tr => {
+            if (tr.tagName === 'H2') {
+                dayBlock = tr.textContent.trim().toLowerCase();
+                return;
+            }
+            if (!dayBlock.startsWith("today")) return;
             if (tr.classList.contains('pzcnt')) {
                 const badge = tr.querySelector('div.neonboxvsml');
                 if (!badge) return;
@@ -228,18 +214,10 @@ async def extract_predictions(page):
         if not home_team or not away_team:
             continue
 
-        # Skip matches from leagues not covered by football-data.org free API
+        # Skip women's / youth fixtures
         section_lower = section.lower()
         if any(skip in section_lower for skip in SKIP_SECTIONS):
-            print(f"  [{SITE}] Skipping {home_team} vs {away_team} — uncovered league ({section})")
-            continue
-
-        # Fallback: skip if either team is a known non-API club (catches cases where
-        # section detection heuristic failed to identify the heading)
-        home_lower = home_team.lower()
-        away_lower = away_team.lower()
-        if any(club in home_lower or club in away_lower for club in KNOWN_NON_API_CLUBS):
-            print(f"  [{SITE}] Skipping {home_team} vs {away_team} — known non-API club (section='{section}')")
+            print(f"  [{SITE}] Skipping {home_team} vs {away_team} — skipped section ({section})")
             continue
 
         predictions.append({

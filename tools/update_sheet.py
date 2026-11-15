@@ -22,6 +22,7 @@ import sys
 from datetime import date
 
 from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
@@ -49,6 +50,7 @@ SITE_COLORS = {
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CREDENTIALS_FILE = os.path.join(BASE_DIR, "credentials.json")
 TOKEN_FILE = os.path.join(BASE_DIR, "token.json")
+SERVICE_ACCOUNT_FILE = os.path.join(BASE_DIR, "service_account.json")
 TMP_DIR = os.path.join(BASE_DIR, ".tmp")
 
 PREDICTIONS_HEADERS = ["Date", "Site", "Home Team", "Away Team", "Prediction", "Result", "Correct"]
@@ -59,6 +61,16 @@ PREDICTIONS_HEADERS = ["Date", "Site", "Home Team", "Away Team", "Prediction", "
 # ---------------------------------------------------------------------------
 
 def get_service():
+    """Google Sheets client. Preferred: a service account (never expires) from
+    env GOOGLE_SERVICE_ACCOUNT_JSON or service_account.json — the sheet must be
+    shared with the service account's email as Editor. Fallback: the personal
+    OAuth token (env GOOGLE_TOKEN_JSON or token.json)."""
+    sa_env = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if sa_env or os.path.exists(SERVICE_ACCOUNT_FILE):
+        info = json.loads(sa_env) if sa_env else json.load(open(SERVICE_ACCOUNT_FILE))
+        creds = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+        return build("sheets", "v4", credentials=creds)
+
     creds = None
     token_env = os.environ.get("GOOGLE_TOKEN_JSON")
     credentials_env = os.environ.get("GOOGLE_CREDENTIALS_JSON")
@@ -75,6 +87,11 @@ def get_service():
                 with open(TOKEN_FILE, "w") as f:
                     f.write(creds.to_json())
         else:
+            if token_env or not sys.stdin.isatty():
+                # Headless (Railway / n8n): a browser login would hang forever.
+                raise RuntimeError(
+                    "Google token is missing, expired or revoked and no service account is "
+                    "configured. Set GOOGLE_SERVICE_ACCOUNT_JSON (see workflows/evening_run.md).")
             if credentials_env:
                 flow = InstalledAppFlow.from_client_config(json.loads(credentials_env), SCOPES)
             else:
@@ -173,6 +190,11 @@ def apply_site_colors(service, sheet_id, site_row_ranges):
 # Mode: predictions
 # ---------------------------------------------------------------------------
 
+def sites_written_for_date(all_rows, run_date):
+    """Sites that already have at least one Predictions row for run_date."""
+    return {row[1] for row in all_rows[1:] if len(row) >= 2 and row[0] == run_date}
+
+
 def mode_predictions(service, run_date):
     sheet_id = get_or_create_tab(service, PREDICTIONS_TAB)
     ensure_headers(service, PREDICTIONS_TAB, PREDICTIONS_HEADERS)
@@ -180,7 +202,15 @@ def mode_predictions(service, run_date):
     rows_to_insert = []
     site_row_ranges = []  # (site, start_0idx, end_0idx)
 
+    # Re-running the morning step must not duplicate rows: skip any site that
+    # already has rows for this date.
+    already_written = sites_written_for_date(read_tab(service, PREDICTIONS_TAB), run_date)
+    if already_written:
+        print(f"  Rows for {run_date} already exist for: {sorted(already_written)} — those sites are skipped")
+
     for site in SITES:
+        if site in already_written:
+            continue
         path = os.path.join(TMP_DIR, f"predictions_{site}_{run_date}.json")
 
         if not os.path.exists(path):
@@ -256,6 +286,45 @@ def mode_predictions(service, run_date):
 # Mode: results
 # ---------------------------------------------------------------------------
 
+def write_results(service, all_rows, run_date, details):
+    """
+    Write Result (col F) and Correct (col G) for run_date's scored predictions.
+    Details whose "correct" is None are pending and left blank. Every row with
+    the same (date, site, home, away) gets the value, so duplicate rows from a
+    repeated morning run don't stay blank. Returns the number of cells-rows written.
+    """
+    lookup = {}  # (date, site, home, away) -> [1-based sheet row numbers]
+    for i, row in enumerate(all_rows):
+        if i == 0 or len(row) < 4:
+            continue
+        lookup.setdefault((row[0], row[1], row[2], row[3]), []).append(i + 1)
+
+    updates = []
+    for detail in details:
+        if detail.get("correct") is None:
+            continue  # pending — retried on the next run
+        key = (run_date, detail["site"], detail["home_team"], detail["away_team"])
+        row_nums = lookup.get(key)
+        if not row_nums:
+            print(f"  WARNING: no sheet row found for {key}")
+            continue
+        for row_num in row_nums:
+            updates.append({
+                "range": f"{PREDICTIONS_TAB}!F{row_num}:G{row_num}",
+                "values": [[detail["result"], detail["correct"]]],
+            })
+
+    if updates:
+        service.spreadsheets().values().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"valueInputOption": "RAW", "data": updates},
+        ).execute()
+        print(f"Updated {len(updates)} rows with results for {run_date} in '{PREDICTIONS_TAB}'")
+    else:
+        print(f"No rows updated for {run_date}.")
+    return len(updates)
+
+
 def mode_results(service, run_date):
     scores_path = os.path.join(TMP_DIR, f"scores_{run_date}.json")
     if not os.path.exists(scores_path):
@@ -270,47 +339,12 @@ def mode_results(service, run_date):
     if not details:
         print("WARNING: scores file has no details — nothing to update")
 
-    # Read current Predictions tab to find row positions
     all_rows = read_tab(service, PREDICTIONS_TAB)
     if not all_rows:
         print("ERROR: Predictions tab is empty.")
         sys.exit(1)
 
-    # Build lookup: (date, site, home_team, away_team) -> 1-based sheet row number
-    # Header is row 1, data starts at row 2
-    lookup = {}
-    for i, row in enumerate(all_rows):
-        if i == 0:
-            continue  # skip header
-        if len(row) < 4:
-            continue
-        key = (row[0], row[1], row[2], row[3])
-        if key not in lookup:  # keep first occurrence
-            lookup[key] = i + 1  # 1-based
-
-    # Build batch update for Result (col F) and Correct (col G)
-    updates = []
-    matched = 0
-    for detail in details:
-        key = (run_date, detail["site"], detail["home_team"], detail["away_team"])
-        row_num = lookup.get(key)
-        if row_num is None:
-            print(f"  WARNING: no sheet row found for {key}")
-            continue
-        updates.append({
-            "range": f"{PREDICTIONS_TAB}!F{row_num}:G{row_num}",
-            "values": [[detail["result"], detail["correct"]]],
-        })
-        matched += 1
-
-    if updates:
-        service.spreadsheets().values().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={"valueInputOption": "RAW", "data": updates},
-        ).execute()
-        print(f"Updated {matched} rows with results in '{PREDICTIONS_TAB}'")
-    else:
-        print("No rows updated — check that predictions were written this morning.")
+    write_results(service, all_rows, run_date, details)
 
     # Re-fetch sheet to get latest data for leaderboard rebuild
     fresh_rows = read_tab(service, PREDICTIONS_TAB)
@@ -321,83 +355,71 @@ def mode_results(service, run_date):
 # Leaderboard
 # ---------------------------------------------------------------------------
 
-def rebuild_leaderboard(service, all_rows):
+def compute_leaderboard(all_rows):
     """
-    Rebuild Leaderboard tab with one column per day and an Average column.
+    Build the Leaderboard table from all Predictions rows (header included).
 
     Layout:
-      Site | Average | 2026-03-11 | 2026-03-10 | ...  (newest date first)
-      forebet | 70.0% | 80% | 60% | ...
+      Site | Win % | Correct | Scored | 2026-03-11 | 2026-03-10 | ...  (newest date first)
+      forebet | 61.5% | 32 | 52 | 80% | 60% | ...
 
-    Each cell = win % for that site on that date (Y / scoreable predictions).
-    "—" when no scoreable predictions exist for that site/date.
-    Average = mean of non-"—" cells. Rows sorted by Average descending.
-    Rows are colour-coded with the same pastel palette as the Predictions tab.
+    Win % is the overall hit rate (all correct / all scored predictions), so a day
+    with 1 scored pick doesn't weigh as much as a day with 5. Scored = rows whose
+    Correct value is Y or N (UNMATCHED and pending rows don't count).
+    Each date cell = that day's hit rate; "—" when nothing was scored.
+    Duplicate rows (same date/site/home/away) count once.
+    Rows are sorted by Win % descending. Returns (header, data_rows).
     """
-    sheet_id = get_or_create_tab(service, LEADERBOARD_TAB)
-
-    # Step 1: build per-(date, site) counters
     counters = {}  # { (date, site): {"total": int, "correct": int} }
     all_dates = set()
+    seen = set()  # duplicate rows (repeated morning runs) are counted once
 
     for i, row in enumerate(all_rows):
         if i == 0:
             continue  # skip header
         if len(row) < 3:
             continue
-        run_date = row[0] if len(row) > 0 else ""
-        site = row[1] if len(row) > 1 else ""
-        home = row[2] if len(row) > 2 else ""
+        run_date, site, home = row[0], row[1], row[2]
         correct_val = row[6] if len(row) > 6 else ""
 
         if not run_date or site not in SITES or home == "SCRAPE_FAILED":
             continue
+        key = tuple(row[:4])
+        if key in seen:
+            continue
+        seen.add(key)
 
         all_dates.add(run_date)
-        key = (run_date, site)
-        if key not in counters:
-            counters[key] = {"total": 0, "correct": 0}
-
+        c = counters.setdefault((run_date, site), {"total": 0, "correct": 0})
         if correct_val in ("Y", "N"):
-            counters[key]["total"] += 1
+            c["total"] += 1
             if correct_val == "Y":
-                counters[key]["correct"] += 1
+                c["correct"] += 1
 
     sorted_dates = sorted(all_dates, reverse=True)  # newest first
 
-    # Step 2: build one data row per site
     data_rows = []
     for site in SITES:
-        day_pcts = []
-        numeric_pcts = []
-
+        day_cells = []
+        site_correct = site_total = 0
         for d in sorted_dates:
             c = counters.get((d, site), {"total": 0, "correct": 0})
-            if c["total"] > 0:
-                pct = c["correct"] / c["total"] * 100
-                cell = f"{pct:.0f}%"
-                numeric_pcts.append(pct)
-            else:
-                cell = "—"
-            day_pcts.append(cell)
+            site_correct += c["correct"]
+            site_total += c["total"]
+            day_cells.append(f"{c['correct'] / c['total'] * 100:.0f}%" if c["total"] else "—")
+        win_pct = f"{site_correct / site_total * 100:.1f}%" if site_total else "—"
+        data_rows.append([site, win_pct, site_correct, site_total] + day_cells)
 
-        if numeric_pcts:
-            avg = sum(numeric_pcts) / len(numeric_pcts)
-            avg_cell = f"{avg:.1f}%"
-        else:
-            avg_cell = "—"
+    data_rows.sort(key=lambda r: float(r[1].rstrip("%")) if r[1] != "—" else -1, reverse=True)
+    header = ["Site", "Win %", "Correct", "Scored"] + sorted_dates
+    return header, data_rows
 
-        # Layout: Site | Average | date_newest | date_next | ...
-        data_rows.append([site, avg_cell] + day_pcts)
 
-    # Step 3: sort by average descending
-    def sort_key(row):
-        avg = row[1]  # Average is now column index 1
-        return float(avg.replace("%", "")) if avg != "—" else -1
-
-    data_rows.sort(key=sort_key, reverse=True)
-
-    header = ["Site", "Average"] + sorted_dates
+def rebuild_leaderboard(service, all_rows):
+    """Rewrite the Leaderboard tab (see compute_leaderboard) with per-site row colours."""
+    sheet_id = get_or_create_tab(service, LEADERBOARD_TAB)
+    header, data_rows = compute_leaderboard(all_rows)
+    sorted_dates = header[4:]
 
     # Clear tab first to remove any stale columns from previous formats
     service.spreadsheets().values().clear(
