@@ -1,0 +1,13 @@
+# Secrets never go into the image — Railway provides them as variables.
+.env
+credentials.json
+token.json
+service_account.json
+service_account*.json
+.tmp/
+.git/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DS_Store

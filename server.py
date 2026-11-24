@@ -52,6 +52,10 @@ _morning_status = {
 # ---------------------------------------------------------------------------
 
 def install_playwright_browsers():
+    if os.environ.get("PLAYWRIGHT_PREINSTALLED"):
+        # Docker image (mcr.microsoft.com/playwright/python) ships Chromium + its system libs.
+        print("[startup] Playwright browsers preinstalled in image.", flush=True)
+        return
     print("[startup] Installing Playwright browsers...", flush=True)
     result = subprocess.run(
         [PYTHON, "-m", "playwright", "install", "--with-deps", "chromium"],

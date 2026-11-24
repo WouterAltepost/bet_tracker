@@ -111,3 +111,9 @@ On failure: `"status": "failed"`, `"error": "<message>"`, `"predictions": []`
 - **FreeSuperTips** listing shows only kick-off times; the detail page's "Sunday 15th November" phrase is used to drop matches not played today. Many of its tips are BTTS/goals, so it often yields fewer than 5 1X2 picks.
 - **OneMillion** moved its homepage picks behind a paywall ("Premium Prediction → Get Access"); the scraper fails until a replacement is decided. (The old scraper used the lowest bookmaker odds, not the site's own tip.)
 - Running the morning sheet write twice no longer duplicates rows: sites that already have rows for the date are skipped.
+
+## Railway build (Nov 2026)
+- Railway's default builder switched from Nixpacks to Railpack (mise). Railpack refused Python 3.11.9 (no GitHub attestations) and, once on 3.13.9, its slim image could not start Playwright's driver: every scraper died with "Connection closed while reading from the driver" while the sheet steps worked.
+- Fix: the repo now builds from `Dockerfile` on `mcr.microsoft.com/playwright/python` (Chromium + system libs included; `railway.toml` forces the Dockerfile builder). Keep the image tag and the `playwright==` pin in `requirements.txt` on the same version. Test locally with `docker build -t bettracker-test .` and run a scraper inside it.
+- A scraper that crashes without writing its output file now gets SCRAPE_FAILED rows. Re-running the morning run replaces a site's SCRAPE_FAILED rows when the retry succeeds, and skips the Claude picks API call when Claude's rows for the date already exist.
+- Push to `main` did not always trigger a Railway deploy; if the Deployments tab doesn't show the new commit, use Cmd+K → "Deploy Latest Commit".

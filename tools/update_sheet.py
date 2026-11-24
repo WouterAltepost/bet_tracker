@@ -191,8 +191,18 @@ def apply_site_colors(service, sheet_id, site_row_ranges):
 # ---------------------------------------------------------------------------
 
 def sites_written_for_date(all_rows, run_date):
-    """Sites that already have at least one Predictions row for run_date."""
-    return {row[1] for row in all_rows[1:] if len(row) >= 2 and row[0] == run_date}
+    """Sites that already have real (not SCRAPE_FAILED) Predictions rows for run_date."""
+    return {row[1] for row in all_rows[1:]
+            if len(row) >= 3 and row[0] == run_date and row[2] != "SCRAPE_FAILED"}
+
+
+def failed_row_indices(all_rows, run_date):
+    """site -> 0-based sheet row indices of its SCRAPE_FAILED rows for run_date."""
+    out = {}
+    for i, row in enumerate(all_rows):
+        if i and len(row) >= 3 and row[0] == run_date and row[2] == "SCRAPE_FAILED":
+            out.setdefault(row[1], []).append(i)
+    return out
 
 
 def mode_predictions(service, run_date):
@@ -203,22 +213,32 @@ def mode_predictions(service, run_date):
     site_row_ranges = []  # (site, start_0idx, end_0idx)
 
     # Re-running the morning step must not duplicate rows: skip any site that
-    # already has rows for this date.
-    already_written = sites_written_for_date(read_tab(service, PREDICTIONS_TAB), run_date)
+    # already has real rows for this date. A site that only has SCRAPE_FAILED
+    # rows is retried, and those rows are replaced if the retry succeeds.
+    all_rows = read_tab(service, PREDICTIONS_TAB)
+    already_written = sites_written_for_date(all_rows, run_date)
+    failed_rows = failed_row_indices(all_rows, run_date)
     if already_written:
         print(f"  Rows for {run_date} already exist for: {sorted(already_written)} — those sites are skipped")
+    rows_to_delete = []
 
     for site in SITES:
         if site in already_written:
             continue
         path = os.path.join(TMP_DIR, f"predictions_{site}_{run_date}.json")
 
-        if not os.path.exists(path):
-            print(f"  [{site}] WARNING: file not found ({path}) — skipping")
-            continue
+        if os.path.exists(path):
+            with open(path) as f:
+                data = json.load(f)
+        else:
+            # The scraper crashed before it could write its own failure file.
+            data = {"status": "failed", "error": f"no output file ({os.path.basename(path)})"}
 
-        with open(path) as f:
-            data = json.load(f)
+        if data["status"] == "failed" and site in failed_rows:
+            print(f"  [{site}] still failing — SCRAPE_FAILED rows already in the sheet")
+            continue
+        if data["status"] != "failed" and site in failed_rows:
+            rows_to_delete += failed_rows[site]
 
         # Row 0 = header, new rows start at index 1; accumulate from there
         site_start = 1 + len(rows_to_insert)
@@ -244,8 +264,18 @@ def mode_predictions(service, run_date):
             print(f"  [{site}] {len(data['predictions'])} predictions loaded")
 
     if not rows_to_insert:
-        print("No rows to insert — check that scrapers ran and wrote .tmp/ files.")
+        print("No rows to insert — nothing new for this date.")
         return
+
+    if rows_to_delete:
+        # Bottom-up so earlier deletions don't shift later indices.
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": [{"deleteDimension": {"range": {
+                "sheetId": sheet_id, "dimension": "ROWS", "startIndex": i, "endIndex": i + 1}}}
+                for i in sorted(rows_to_delete, reverse=True)]},
+        ).execute()
+        print(f"  Replaced {len(rows_to_delete)} SCRAPE_FAILED row(s) with fresh results")
 
     num_new = len(rows_to_insert)
 

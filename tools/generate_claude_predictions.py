@@ -165,6 +165,17 @@ def run_agentic_loop(client, run_date):
 
 def main():
     run_date = str(date.today())
+
+    # A re-run of the morning pipeline must not pay for a second set of picks
+    # that the sheet writer would skip anyway.
+    try:
+        from update_sheet import PREDICTIONS_TAB, get_service, read_tab, sites_written_for_date
+        if SITE in sites_written_for_date(read_tab(get_service(), PREDICTIONS_TAB), run_date):
+            print(f"[{SITE}] Picks for {run_date} are already in the sheet — skipping the API call.")
+            return
+    except Exception as e:
+        print(f"[{SITE}] Could not check the sheet ({e}) — generating anyway.")
+
     print(f"[{SITE}] Generating predictions for {run_date} using {MODEL}...")
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
