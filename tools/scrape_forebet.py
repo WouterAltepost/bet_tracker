@@ -43,6 +43,7 @@ def write_output(run_date, predictions, error=None):
 
 async def scrape():
     run_date = str(date.today())
+    os.makedirs(TMP_DIR, exist_ok=True)  # debug files are written before write_output()
     print(f"[{SITE}] Scraping {URL} for {run_date} ...")
 
     async with async_playwright() as p:
@@ -57,12 +58,19 @@ async def scrape():
         page = await context.new_page()
 
         try:
-            await page.goto(URL, wait_until="domcontentloaded", timeout=30000)
+            response = await page.goto(URL, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(3000)
 
             predictions = await extract_predictions(page, run_date)
 
             if not predictions:
+                # Log what the server was actually served (Railway keeps no files we can read).
+                title = await page.title()
+                text = " ".join((await page.evaluate("() => document.body ? document.body.innerText : ''")).split())
+                rows = await page.evaluate("document.querySelectorAll('div.rcnt').length")
+                print(f"[{SITE}] DIAG http={response.status if response else '?'} title={title!r} "
+                      f"rcnt_rows={rows} url={page.url}")
+                print(f"[{SITE}] DIAG text: {text[:400]}")
                 html_path = os.path.join(TMP_DIR, f"debug_{SITE}_{run_date}.html")
                 with open(html_path, "w") as f:
                     f.write(await page.content())

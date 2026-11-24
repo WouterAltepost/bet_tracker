@@ -70,6 +70,7 @@ def pick_prediction(probs, tip):
 
 async def scrape():
     run_date = str(date.today())
+    os.makedirs(TMP_DIR, exist_ok=True)  # debug files are written before write_output()
     print(f"[{SITE}] Scraping {URL} for {run_date} ...")
 
     async with async_playwright() as p:

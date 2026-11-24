@@ -61,6 +61,7 @@ def badge_to_prediction(badge_text):
 
 async def scrape():
     run_date = str(date.today())
+    os.makedirs(TMP_DIR, exist_ok=True)  # debug files are written before write_output()
     print(f"[{SITE}] Scraping {URL} for {run_date} ...")
 
     # Comprehensive stealth init script — hides common automation fingerprints

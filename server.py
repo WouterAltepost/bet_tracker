@@ -144,11 +144,20 @@ def _run_morning_pipeline(run_date):
     ]
 
     results = []
+    nothing_new = False
     for cmd, label in steps_to_run:
+        if nothing_new and label in ("generate_analysis", "generate_parlay"):
+            # A re-run that added no rows: don't pay to regenerate the same analysis.
+            results.append({"step": label, "status": "ok", "returncode": 0,
+                            "output": "Skipped — update_sheet wrote no new rows."})
+            print(f"[morning] {label} → skipped (no new rows)", flush=True)
+            continue
         print(f"[morning] Running {label}...", flush=True)
         result = run_step(cmd, label)
         results.append(result)
         print(f"[morning] {label} → {result['status']}", flush=True)
+        if label == "update_sheet" and "No rows to insert" in result["output"]:
+            nothing_new = True
 
     scraper_results = results[:-3]  # all scrapers (indices 0-5)
     sheet_result = results[-3]      # update_sheet
