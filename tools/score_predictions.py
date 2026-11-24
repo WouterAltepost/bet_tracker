@@ -31,7 +31,7 @@ from datetime import date, timedelta
 
 from rapidfuzz import fuzz
 
-SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "claude"]
+SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "zulubet", "statarea", "claude"]
 # Each team must score at least this (see team_score).
 # Calibrated on Feb/Mar 2026 data: all true matches scored >= 69 per team; the
 # old average-of-two >= 55 rule matched 'Preston v Millwall' to 'Cremonese v AC Milan'.

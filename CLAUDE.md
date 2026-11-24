@@ -4,18 +4,23 @@ You're working inside the **WAT framework** (Workflows, Agents, Tools). This arc
 
 ## Project: Football Prediction Tracker
 
-This system automates the tracking of football match predictions from 5 websites, compares them against real results, and maintains a live Google Sheet with win percentage statistics per site.
+This system automates the tracking of football match predictions from several websites (plus Claude's own picks), compares them against real results, and maintains a live Google Sheet with win percentage statistics per site.
 
 **The two daily runs:**
 - **Morning run** — Scrape today's top 5 predictions from each site and write them to Google Sheets
 - **Evening run** — Fetch real match results, score each site's predictions, update win percentages in Google Sheets
 
-**The 5 prediction sites:**
-- Forebet: https://www.forebet.com/
+**Active prediction sites** (`ACTIVE_SITES` in `tools/update_sheet.py`):
 - PredictZ: https://www.predictz.com/
-- OneMillion: https://onemillionpredictions.com/
 - Vitibet: https://www.vitibet.com/index.php?clanek=quicktips&sekce=fotbal&lang=en
 - FreeSuperTips: https://www.freesupertips.com/predictions/
+- Zulubet: https://www.zulubet.com/ (added 2026-11-24)
+- Statarea: https://www.statarea.com/predictions (added 2026-11-24)
+- Claude (AI picks via `tools/generate_claude_predictions.py`)
+
+**Retired 2026-11-24** (replaced by Zulubet and Statarea; history stays on the Leaderboard, scrapers kept in `tools/` for reference):
+- Forebet — Cloudflare blocks Railway's servers
+- OneMillion — picks moved behind a paywall
 
 **Scraping approach:** All sites require Playwright (headless browser) as they block standard HTTP requests. Each site has its own dedicated scraper tool. Always grab whatever the site surfaces as their top 5 picks of the day.
 
@@ -84,11 +89,14 @@ This loop is how the framework improves over time.
 ```
 .tmp/                   # Temporary scraped data and intermediate files. Regenerated as needed.
 tools/
-  scrape_forebet.py     # Playwright scraper for Forebet
+  scrape_forebet.py     # (retired) Playwright scraper for Forebet
   scrape_predictz.py    # Playwright scraper for PredictZ
-  scrape_onemillion.py  # Playwright scraper for OneMillion
+  scrape_onemillion.py  # (retired) Playwright scraper for OneMillion
   scrape_vitibet.py     # Playwright scraper for Vitibet
   scrape_freesupertips.py # Playwright scraper for FreeSuperTips
+  scrape_zulubet.py     # Playwright scraper for Zulubet
+  scrape_statarea.py    # Playwright scraper for Statarea
+  pick_utils.py         # Shared: keep only picks ESPN lists (so they can be scored), skip women/youth
   run_evening.py        # Evening run: scores all pending dates from the sheet + rebuilds leaderboard
   fetch_results.py      # Fetches real match results (football-data.org + ESPN)
   score_predictions.py  # Compares predictions to results, calculates scores

@@ -6,7 +6,7 @@ Usage:
   python tools/update_sheet.py --mode=results     [--date=YYYY-MM-DD]
 
 Mode: predictions
-  Reads .tmp/predictions_{site}_{date}.json for each of 5 sites.
+  Reads .tmp/predictions_{site}_{date}.json for each site in ACTIVE_SITES.
   Appends up to 30 rows to the "Predictions" tab.
 
 Mode: results
@@ -36,7 +36,13 @@ SPREADSHEET_ID = "19kX5kwwut8FAjNinI2YJjfm7LihruhkDYIXf8qD0f5M"
 PREDICTIONS_TAB = "Predictions"
 LEADERBOARD_TAB = "Leaderboard"
 
-SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "claude"]
+# Every site that has ever been tracked — kept so historical rows are still
+# scored and shown on the Leaderboard.
+SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "zulubet", "statarea", "claude"]
+
+# Sites the morning run collects today. Forebet (Cloudflare blocks Railway) and
+# OneMillion (paywall) were retired on 2026-11-24 and replaced by Zulubet and Statarea.
+ACTIVE_SITES = ["predictz", "vitibet", "freesupertips", "zulubet", "statarea", "claude"]
 
 SITE_COLORS = {
     "forebet":       {"red": 0.788, "green": 0.875, "blue": 0.953},  # pastel blue
@@ -44,6 +50,8 @@ SITE_COLORS = {
     "onemillion":    {"red": 0.851, "green": 0.918, "blue": 0.827},  # pastel green
     "vitibet":       {"red": 0.851, "green": 0.824, "blue": 0.914},  # pastel purple
     "freesupertips": {"red": 0.957, "green": 0.800, "blue": 0.800},  # pastel red
+    "zulubet":       {"red": 0.800, "green": 0.937, "blue": 0.929},  # pastel teal
+    "statarea":      {"red": 0.957, "green": 0.851, "blue": 0.918},  # pastel pink
     "claude":        {"red": 1.000, "green": 0.949, "blue": 0.800},  # pastel yellow
 }
 
@@ -222,7 +230,7 @@ def mode_predictions(service, run_date):
         print(f"  Rows for {run_date} already exist for: {sorted(already_written)} — those sites are skipped")
     rows_to_delete = []
 
-    for site in SITES:
+    for site in ACTIVE_SITES:
         if site in already_written:
             continue
         path = os.path.join(TMP_DIR, f"predictions_{site}_{run_date}.json")

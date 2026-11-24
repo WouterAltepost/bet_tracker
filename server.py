@@ -132,11 +132,14 @@ def _run_morning_pipeline(run_date):
     global _morning_status
 
     steps_to_run = [
-        ([PYTHON, "tools/scrape_forebet.py"],           "scrape_forebet"),
+        # Forebet (Cloudflare blocks Railway) and OneMillion (paywall) were
+        # retired on 2026-11-24 (replaced by Zulubet and Statarea); their scrapers
+        # stay in tools/ for reference.
         ([PYTHON, "tools/scrape_predictz.py"],          "scrape_predictz"),
-        ([PYTHON, "tools/scrape_onemillion.py"],        "scrape_onemillion"),
         ([PYTHON, "tools/scrape_vitibet.py"],           "scrape_vitibet"),
         ([PYTHON, "tools/scrape_freesupertips.py"],     "scrape_freesupertips"),
+        ([PYTHON, "tools/scrape_zulubet.py"],           "scrape_zulubet"),
+        ([PYTHON, "tools/scrape_statarea.py"],          "scrape_statarea"),
         ([PYTHON, "tools/generate_claude_predictions.py"], "generate_claude"),
         ([PYTHON, "tools/update_sheet.py", "--mode=predictions"], "update_sheet"),
         ([PYTHON, "tools/generate_analysis.py"],              "generate_analysis"),
@@ -159,7 +162,7 @@ def _run_morning_pipeline(run_date):
         if label == "update_sheet" and "No rows to insert" in result["output"]:
             nothing_new = True
 
-    scraper_results = results[:-3]  # all scrapers (indices 0-5)
+    scraper_results = results[:-3]  # scrapers + Claude picks
     sheet_result = results[-3]      # update_sheet
 
     if sheet_result["status"] == "ok":
