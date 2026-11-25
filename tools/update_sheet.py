@@ -36,18 +36,15 @@ SPREADSHEET_ID = "19kX5kwwut8FAjNinI2YJjfm7LihruhkDYIXf8qD0f5M"
 PREDICTIONS_TAB = "Predictions"
 LEADERBOARD_TAB = "Leaderboard"
 
-# Every site that has ever been tracked — kept so historical rows are still
-# scored and shown on the Leaderboard.
-SITES = ["forebet", "predictz", "onemillion", "vitibet", "freesupertips", "zulubet", "statarea", "claude"]
-
-# Sites the morning run collects today. Forebet (Cloudflare blocks Railway) and
-# OneMillion (paywall) were retired on 2026-11-24 and replaced by Zulubet and Statarea.
+# Sites the morning run collects, and that are scored and shown on the Leaderboard.
+# Forebet (Cloudflare blocks Railway) and OneMillion (paywall) were retired on
+# 2026-11-24, replaced by Zulubet and Statarea; the sheet was reset to start
+# from 2026-11-24 (backup of the March history: backups/sheet_backup_2026-11-25/).
 ACTIVE_SITES = ["predictz", "vitibet", "freesupertips", "zulubet", "statarea", "claude"]
+SITES = ACTIVE_SITES
 
 SITE_COLORS = {
-    "forebet":       {"red": 0.788, "green": 0.875, "blue": 0.953},  # pastel blue
     "predictz":      {"red": 0.980, "green": 0.898, "blue": 0.706},  # pastel orange
-    "onemillion":    {"red": 0.851, "green": 0.918, "blue": 0.827},  # pastel green
     "vitibet":       {"red": 0.851, "green": 0.824, "blue": 0.914},  # pastel purple
     "freesupertips": {"red": 0.957, "green": 0.800, "blue": 0.800},  # pastel red
     "zulubet":       {"red": 0.800, "green": 0.937, "blue": 0.929},  # pastel teal
@@ -399,7 +396,7 @@ def compute_leaderboard(all_rows):
 
     Layout:
       Site | Win % | Correct | Scored | 2026-03-11 | 2026-03-10 | ...  (newest date first)
-      forebet | 61.5% | 32 | 52 | 80% | 60% | ...
+      vitibet | 61.5% | 32 | 52 | 80% | 60% | ...
 
     Win % is the overall hit rate (all correct / all scored predictions), so a day
     with 1 scored pick doesn't weigh as much as a day with 5. Scored = rows whose
@@ -473,9 +470,18 @@ def rebuild_leaderboard(service, all_rows):
     ).execute()
     print(f"Leaderboard rebuilt in '{LEADERBOARD_TAB}' ({len(sorted_dates)} day(s))")
 
-    # Step 4: apply per-site pastel row colours (same palette as Predictions tab)
+    # Step 4: apply per-site pastel row colours (same palette as Predictions tab).
+    # First reset the background below the header, so rows left over from a
+    # longer previous leaderboard (e.g. removed sites) don't keep their colour.
     num_cols = len(header)
-    color_requests = []
+    color_requests = [{
+        "repeatCell": {
+            "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": 200,
+                      "startColumnIndex": 0, "endColumnIndex": 26},
+            "cell": {"userEnteredFormat": {"backgroundColor": {"red": 1, "green": 1, "blue": 1}}},
+            "fields": "userEnteredFormat.backgroundColor",
+        }
+    }]
     for row_idx, row in enumerate(data_rows):
         site = row[0]
         color = SITE_COLORS.get(site)
@@ -499,7 +505,7 @@ def rebuild_leaderboard(service, all_rows):
             spreadsheetId=SPREADSHEET_ID,
             body={"requests": color_requests},
         ).execute()
-        print(f"  [color] Leaderboard colours applied for {len(color_requests)} row(s)")
+        print(f"  [color] Leaderboard colours applied for {len(color_requests) - 1} row(s)")
 
 
 # ---------------------------------------------------------------------------

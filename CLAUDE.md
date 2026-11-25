@@ -18,7 +18,7 @@ This system automates the tracking of football match predictions from several we
 - Statarea: https://www.statarea.com/predictions (added 2026-11-24)
 - Claude (AI picks via `tools/generate_claude_predictions.py`)
 
-**Retired 2026-11-24** (replaced by Zulubet and Statarea; history stays on the Leaderboard, scrapers kept in `tools/` for reference):
+**Retired 2026-11-24** (replaced by Zulubet and Statarea; removed from the sheet and Leaderboard, scrapers kept in `tools/` for reference):
 - Forebet — Cloudflare blocks Railway's servers
 - OneMillion — picks moved behind a paywall
 
@@ -108,6 +108,8 @@ workflows/
 credentials.json        # Google OAuth credentials (gitignored)
 token.json              # Google OAuth token (gitignored)
 ```
+
+**Sheet reset 2026-11-25:** all stats start from the 2026-11-24 run. The March 2026 history and the retired sites' rows were deleted; a CSV backup of every tab is in `backups/sheet_backup_2026-11-25/` (gitignored).
 
 **Core principle:** Local files are just for processing. The Google Sheet is the live source of truth. Everything in `.tmp/` is disposable.
 

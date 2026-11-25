@@ -31,3 +31,6 @@ node_modules/
 # IDE
 .idea/
 .vscode/
+
+# Local sheet backups (may contain the full prediction history)
+backups/
